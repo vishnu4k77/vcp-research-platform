@@ -1,0 +1,15 @@
+class MarketStates:
+
+    STRONG_BULL = "STRONG_BULL"
+
+    BULL = "BULL"
+
+    NEUTRAL = "NEUTRAL"
+
+    DEFENSIVE = "DEFENSIVE"
+
+    CORRECTION = "CORRECTION"
+
+    BEAR = "BEAR"
+
+    HIGH_VOLATILITY = "HIGH_VOLATILITY"

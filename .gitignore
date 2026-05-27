@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv/
+vcpenv/
+.env/
+
+# Environment Variables
+.env
+
+# VSCode
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# SQL Lite
+*.db
+*.sqlite3
+
+# Cache
+.cache/
+.pytest_cache/
+
+# Build
+dist/
+build/
+
+# Coverage
+htmlcov/
+.coverage
+
+# Temporary
+temp/
+tmp/
+
+# Secrets
+secrets/
+credentials/
+
+# Data Exports
+exports/
+reports/
+
+# Runtime artifacts
+runtime/
+
+# Parquet
+*.parquet
+
+# CSV dumps
+*.csv
+
+# Pickle
+*.pkl
+
+# Model artifacts
+models/
+
+# Local config
+local_settings.py
