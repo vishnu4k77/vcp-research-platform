@@ -1,8 +1,8 @@
-from sqlalchemy import create_engine
-from dotenv import load_dotenv
-import urllib
 import os
+import urllib
 
+from dotenv import load_dotenv
+from sqlalchemy import create_engine
 
 load_dotenv()
 
@@ -16,8 +16,4 @@ params = urllib.parse.quote_plus(
     f"Trusted_Connection=yes;"
 )
 
-connection_string = f"mssql+pyodbc:///?odbc_connect={params}"
-
-engine = create_engine(connection_string)
-
-print("\nSQL Server connection initialized")
+engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}")

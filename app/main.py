@@ -1,20 +1,58 @@
-import pandas as pd
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import pandas as pd
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config.db import engine
+from app.config.logging_config import get_logger
+from app.config.strategy_config import StrategyConfig
 from app.config.ticker_loader import load_tickers
+from app.data.yahoo_service import YahooFinanceService
+from app.services.market_query_service import MarketQueryService
 
-from app.data.yahoo_service import (
-    YahooFinanceService
-)
+logger = get_logger(__name__)
 
-from app.services.market_query_service import (
-    MarketQueryService
-)
+
+class RateLimiter:
+    """
+    Thread-safe minimum-interval rate limiter.
+
+    Guarantees at least `min_interval` seconds between successive acquire()
+    calls regardless of how many threads are waiting. This serializes Yahoo
+    Finance downloads while allowing DB reads/writes to run concurrently.
+    """
+
+    def __init__(self, min_interval: float) -> None:
+        self._lock = threading.Lock()
+        self._min_interval = min_interval
+        self._last_called = 0.0
+
+    def acquire(self) -> None:
+        with self._lock:
+            elapsed = time.monotonic() - self._last_called
+            wait = self._min_interval - elapsed
+            if wait > 0:
+                time.sleep(wait)
+            self._last_called = time.monotonic()
 
 
 class DataIngestionPipeline:
+    """
+    Pulls incremental OHLCV data from Yahoo Finance for every active ticker
+    and persists it to daily_price_data.
+
+    Design rules:
+      - Idempotent: safe to re-run; duplicate rows are filtered before insert.
+      - Rate-limited: one Yahoo call per YAHOO_RATE_LIMIT_SLEEP_SECONDS across
+        all worker threads (RateLimiter serializes API calls).
+      - Concurrent: DB reads/writes and data processing run in parallel across
+        INGESTION_MAX_WORKERS threads.
+      - Per-ticker failures are logged and skipped — one bad ticker never
+        aborts the full run.
+    """
 
     INSERT_COLUMNS = [
         "symbol",
@@ -23,306 +61,191 @@ class DataIngestionPipeline:
         "high_price",
         "low_price",
         "close_price",
-        "volume"
+        "volume",
     ]
 
     @staticmethod
-    def _validate_latest_db_date(
-        latest_date,
-        ticker: str
-    ):
-
+    def _validate_latest_db_date(latest_date, ticker: str):
         if latest_date is None:
-
             return None
-
         try:
-
-            latest_date = pd.to_datetime(
-                latest_date,
-                errors="coerce"
-            ).date()
-
+            latest_date = pd.to_datetime(latest_date, errors="coerce").date()
             if pd.isna(latest_date):
-
-                print(
-                    f"Invalid DB date for {ticker}"
-                )
-
+                logger.warning("Invalid DB date for %s", ticker)
                 return None
-
             today = pd.Timestamp.today().date()
-
-            # future DB corruption protection
             if latest_date > today:
-
-                print(
-                    f"Future DB date detected for {ticker}: {latest_date}"
-                )
-
+                logger.warning("Future DB date for %s: %s", ticker, latest_date)
                 return None
-
             return latest_date
-
-        except Exception as e:
-
-            print(
-                f"Date validation failed for {ticker}"
-            )
-
-            print(str(e))
-
+        except Exception as exc:
+            logger.error("Date validation failed for %s: %s", ticker, exc)
             return None
 
     @staticmethod
-    def _should_skip_ingestion(
-        latest_date,
-        ticker: str
-    ) -> bool:
-
+    def _should_skip_ingestion(latest_date, ticker: str) -> bool:
         if latest_date is None:
-
             return False
-
         today = pd.Timestamp.today().date()
-
-        # already latest candle
         if latest_date >= today:
-
-            print(
-                f"{ticker} already up-to-date"
-            )
-
+            logger.debug("%s already up-to-date (latest: %s)", ticker, latest_date)
             return True
-
         return False
 
     @staticmethod
-    def _validate_insert_dataframe(
-        df: pd.DataFrame,
-        ticker: str
-    ) -> pd.DataFrame:
-
+    def _validate_insert_dataframe(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
         if df.empty:
-
             return pd.DataFrame()
 
-        required_columns = [
-            "trade_date",
-            "open_price",
-            "high_price",
-            "low_price",
-            "close_price",
-            "volume"
-        ]
-
-        missing_columns = [
-            col
-            for col in required_columns
-            if col not in df.columns
-        ]
-
-        if missing_columns:
-
-            print(
-                f"Insert columns missing for {ticker}: {missing_columns}"
-            )
-
+        required = ["trade_date", "open_price", "high_price",
+                    "low_price", "close_price", "volume"]
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            logger.error("Insert columns missing for %s: %s", ticker, missing)
             return pd.DataFrame()
 
-        # add symbol
+        df = df.copy()
         df["symbol"] = ticker
-
-        # final insert ordering
-        final_df = df[
-            DataIngestionPipeline
-            .INSERT_COLUMNS
-        ].copy()
-
-        # remove duplicate rows
-        final_df.drop_duplicates(
-            subset=["symbol", "trade_date"],
-            inplace=True
-        )
-
-        # final sorting
-        final_df.sort_values(
-            by="trade_date",
-            inplace=True
-        )
-
-        final_df.reset_index(
-            drop=True,
-            inplace=True
-        )
-
-        return final_df
+        final = df[DataIngestionPipeline.INSERT_COLUMNS].copy()
+        final.drop_duplicates(subset=["symbol", "trade_date"], inplace=True)
+        final.sort_values("trade_date", inplace=True)
+        final.reset_index(drop=True, inplace=True)
+        return final
 
     @staticmethod
-    def _insert_dataframe(
-        df: pd.DataFrame,
-        ticker: str
-    ):
-
-        if df.empty:
-
-            print(
-                f"No rows available for insertion: {ticker}"
-            )
-
-            return
-
+    def _filter_existing_dates(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+        """Remove rows already in daily_price_data — makes every insert idempotent."""
         try:
+            with engine.connect() as conn:
+                existing = pd.read_sql(
+                    text("SELECT trade_date FROM daily_price_data WHERE symbol = :s"),
+                    conn,
+                    params={"s": ticker},
+                )
+            if existing.empty:
+                return df
+            existing_dates = set(existing["trade_date"].tolist())
+            before = len(df)
+            df = df[~df["trade_date"].isin(existing_dates)].copy()
+            skipped = before - len(df)
+            if skipped:
+                logger.debug("%s: filtered %d already-stored row(s)", ticker, skipped)
+            return df
+        except Exception as exc:
+            logger.warning("Could not pre-filter dates for %s: %s", ticker, exc)
+            return df
 
-            rows_inserted = df.to_sql(
+    @staticmethod
+    def _insert_dataframe(df: pd.DataFrame, ticker: str) -> None:
+        if df.empty:
+            logger.debug("No new rows to insert for %s", ticker)
+            return
+        try:
+            # SQL Server hard limit: 2100 parameters per statement.
+            # 7 columns × 250 rows = 1750 — safely under the limit.
+            rows = df.to_sql(
                 "daily_price_data",
                 engine,
                 if_exists="append",
                 index=False,
                 method="multi",
-                chunksize=500
+                chunksize=250,
             )
-
-            print(
-                f"Inserted rows for {ticker}: {rows_inserted}"
-            )
-
-        except SQLAlchemyError as e:
-
-            error_message = str(e)
-
-            if "uq_symbol_date" in error_message:
-
-                print(
-                    f"Duplicate rows skipped for {ticker}"
-                )
-
+            logger.info("Inserted %s rows for %s", rows, ticker)
+        except SQLAlchemyError as exc:
+            msg = str(exc)
+            if "uq_symbol_date" in msg or "UNIQUE" in msg.upper():
+                logger.warning("Duplicate constraint hit for %s (rows skipped)", ticker)
             else:
-
-                print(
-                    f"SQL insertion failed for {ticker}"
-                )
-
-                print(error_message)
+                logger.error("SQL insert failed for %s: %s", ticker, exc, exc_info=True)
 
     @staticmethod
-    def _process_ticker(
-        ticker: str
-    ):
+    def _process_ticker(ticker: str, rate_limiter: RateLimiter) -> None:
+        """
+        Full ingestion cycle for one ticker.
 
-        print(f"\nProcessing {ticker}")
-
-        # get latest DB date
-        latest_db_date = (
-            MarketQueryService
-            .get_latest_trade_date(
-                ticker
-            )
+        DB reads happen concurrently across all workers.
+        Yahoo Finance download is serialized via rate_limiter.acquire().
+        DB insert happens concurrently after the download completes.
+        """
+        latest_db_date = MarketQueryService.get_latest_trade_date(ticker)
+        validated_date = DataIngestionPipeline._validate_latest_db_date(
+            latest_db_date, ticker
         )
 
-        validated_latest_date = (
-            DataIngestionPipeline
-            ._validate_latest_db_date(
-                latest_db_date,
-                ticker
-            )
-        )
-
-        print(
-            f"Validated latest DB date: {validated_latest_date}"
-        )
-
-        # skip unnecessary ingestion
-        if (
-            DataIngestionPipeline
-            ._should_skip_ingestion(
-                validated_latest_date,
-                ticker
-            )
-        ):
-
+        if DataIngestionPipeline._should_skip_ingestion(validated_date, ticker):
             return
 
-        # fetch incremental Yahoo data
-        clean_df = (
-            YahooFinanceService
-            .fetch_stock_data(
-                ticker=ticker,
-                latest_date=validated_latest_date
-            )
-        )
+        # Serialize Yahoo API calls — one request per YAHOO_RATE_LIMIT_SLEEP_SECONDS
+        rate_limiter.acquire()
 
+        clean_df = YahooFinanceService.fetch_stock_data(
+            ticker=ticker,
+            latest_date=validated_date,
+        )
         if clean_df.empty:
-
-            print(
-                f"No clean Yahoo data available for {ticker}"
-            )
-
+            logger.warning("No clean Yahoo data for %s", ticker)
             return
 
-        # final insert validation
-        final_insert_df = (
-            DataIngestionPipeline
-            ._validate_insert_dataframe(
-                clean_df,
-                ticker
-            )
-        )
-
-        if final_insert_df.empty:
-
-            print(
-                f"No valid insert rows for {ticker}"
-            )
-
+        final_df = DataIngestionPipeline._validate_insert_dataframe(clean_df, ticker)
+        if final_df.empty:
+            logger.warning("No valid insert rows for %s", ticker)
             return
 
-        print(
-            f"Final validated rows for insertion: {len(final_insert_df)}"
-        )
+        final_df = DataIngestionPipeline._filter_existing_dates(final_df, ticker)
+        if final_df.empty:
+            logger.debug("%s: all fetched rows already stored", ticker)
+            return
 
-        # insert into DB
-        DataIngestionPipeline._insert_dataframe(
-            final_insert_df,
-            ticker
-        )
+        logger.info("%s: %d new rows to insert", ticker, len(final_df))
+        DataIngestionPipeline._insert_dataframe(final_df, ticker)
 
     @staticmethod
-    def run():
-
+    def run() -> None:
         tickers = load_tickers()
-
         if not tickers:
-
-            print(
-                "No tickers configured"
-            )
-
+            logger.warning("No tickers configured — ingestion skipped")
             return
 
-        print(
-            f"\nStarting ingestion for {len(tickers)} tickers"
+        total = len(tickers)
+        max_workers = StrategyConfig.INGESTION_MAX_WORKERS
+        logger.info(
+            "Starting ingestion | tickers=%d | workers=%d | rate_limit=%.1fs",
+            total,
+            max_workers,
+            StrategyConfig.YAHOO_RATE_LIMIT_SLEEP_SECONDS,
         )
 
-        for ticker in tickers:
+        rate_limiter = RateLimiter(StrategyConfig.YAHOO_RATE_LIMIT_SLEEP_SECONDS)
+        completed = 0
+        counter_lock = threading.Lock()
 
-            try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    DataIngestionPipeline._process_ticker, ticker, rate_limiter
+                ): ticker
+                for ticker in tickers
+            }
 
-                DataIngestionPipeline._process_ticker(
-                    ticker
-                )
+            for future in as_completed(futures):
+                ticker = futures[future]
+                with counter_lock:
+                    completed += 1
+                    progress = completed
 
-            except Exception as e:
+                try:
+                    future.result()
+                    logger.info("[%d/%d] Completed %s", progress, total, ticker)
+                except Exception as exc:
+                    logger.error(
+                        "[%d/%d] Failed %s: %s",
+                        progress, total, ticker, exc,
+                        exc_info=True,
+                    )
 
-                print(
-                    f"Pipeline failure for {ticker}"
-                )
-
-                print(str(e))
-
-        print("\nData ingestion completed")
+        logger.info("Data ingestion completed | %d tickers processed", total)
 
 
 if __name__ == "__main__":
-
     DataIngestionPipeline.run()
