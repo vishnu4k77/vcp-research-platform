@@ -12,7 +12,6 @@ from app.services.market_query_service import MarketQueryService
 
 logger = get_logger(__name__)
 
-_NIFTY_TICKER = "^NSEI"
 _LOOKBACK_DAYS = 400   # enough history for EMA 200 + slope warmup
 
 
@@ -67,14 +66,14 @@ class IndexRegime:
 
         try:
             raw = yf.download(
-                tickers=_NIFTY_TICKER,
+                tickers=StrategyConfig.NIFTY_TICKER,
                 period=f"{_LOOKBACK_DAYS}d",
                 progress=False,
                 auto_adjust=True,
             )
 
             if raw.empty:
-                logger.error("Yahoo Finance returned no data for %s", _NIFTY_TICKER)
+                logger.error("Yahoo Finance returned no data for %s", StrategyConfig.NIFTY_TICKER)
                 return pd.DataFrame()
 
             if isinstance(raw.columns, pd.MultiIndex):
@@ -88,7 +87,11 @@ class IndexRegime:
             )
 
             if date_col is None or "Close" not in raw.columns:
-                logger.error("Unexpected Nifty data structure: %s", raw.columns.tolist())
+                logger.error(
+                    "Unexpected %s data structure: %s",
+                    StrategyConfig.NIFTY_TICKER,
+                    raw.columns.tolist(),
+                )
                 return pd.DataFrame()
 
             df = raw[[date_col, "Close"]].copy()
@@ -98,11 +101,13 @@ class IndexRegime:
             df.sort_values("trade_date", inplace=True)
             df.reset_index(drop=True, inplace=True)
 
-            logger.debug("Fetched %d Nifty bars", len(df))
+            logger.debug("Fetched %d %s bars", len(df), StrategyConfig.NIFTY_TICKER)
             return df
 
         except Exception as exc:
-            logger.error("Nifty fetch failed: %s", exc, exc_info=True)
+            logger.error(
+                "%s fetch failed: %s", StrategyConfig.NIFTY_TICKER, exc, exc_info=True
+            )
             return pd.DataFrame()
 
     @staticmethod

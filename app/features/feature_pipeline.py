@@ -1,8 +1,12 @@
+import sys
+
 import pandas as pd
 from sqlalchemy import text
+from tqdm import tqdm
 
 from app.config.db import engine
 from app.config.logging_config import get_logger
+from app.config.strategy_config import StrategyConfig
 
 from app.features.ema_feature import EMAFeature
 from app.features.stage_feature import StageFeature
@@ -53,6 +57,9 @@ class FeaturePipeline:
         "daily_range_pct",
         "volatility_10",
         "volatility_contraction",
+        # price context — used by BreakoutSignal (DRY: computed once here, not per signal)
+        "high_52w",
+        "low_52w",
     ]
 
     @staticmethod
@@ -212,14 +219,13 @@ class FeaturePipeline:
         )
 
         try:
-            # SQL Server limit: 2100 params. stock_features has 18 cols → max 116 rows/insert.
             final_df.to_sql(
                 "stock_features",
                 engine,
                 if_exists="append",
                 index=False,
                 method="multi",
-                chunksize=100,
+                chunksize=StrategyConfig.SQL_BATCH_SIZE,
             )
             logger.info("Saved %d feature rows to stock_features", len(final_df))
 
@@ -248,16 +254,19 @@ class FeaturePipeline:
 
         all_feature_frames = []
 
-        unique_symbols = validated_df["symbol"].unique()
+        n_symbols = validated_df["symbol"].nunique()
+        logger.info("Processing features for %d symbols", n_symbols)
 
-        logger.info("Processing features for %d symbols", len(unique_symbols))
-
-        for symbol in unique_symbols:
-
-            symbol_df = validated_df[
-                validated_df["symbol"] == symbol
-            ].copy()
-
+        for symbol, symbol_df in tqdm(
+            validated_df.groupby("symbol", sort=False),
+            desc="Features",
+            unit="sym",
+            ncols=90,
+            file=sys.stderr,
+            leave=True,
+            total=n_symbols,
+        ):
+            symbol_df = symbol_df.copy()
             feature_df = FeaturePipeline.process_symbol(symbol_df)
 
             if feature_df.empty:

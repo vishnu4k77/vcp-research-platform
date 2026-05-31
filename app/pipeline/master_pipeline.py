@@ -7,6 +7,7 @@ from app.main import DataIngestionPipeline
 from app.features.feature_pipeline import FeaturePipeline
 from app.regime.regime_pipeline import RegimePipeline
 from app.signals.signal_pipeline import SignalPipeline
+from app.sector.sector_momentum import SectorMomentum
 
 logger = get_logger(__name__)
 
@@ -109,10 +110,30 @@ class MasterPipeline:
             context.mark_step_completed("regime")   # non-blocking
 
         # ── Step 4: Signal generation ─────────────────────────────────────
+        # Pass regime market_status so SignalPipeline can apply the regime gate
+        # (suppress breakout/VCP signals in BEAR; suppress all in cash_mode).
+        cached_regime = context.get_cache_object("regime")
+        market_status = cached_regime.market_status if cached_regime is not None else None
+
         if not MasterPipeline._run_step(
-            context, "signals", SignalPipeline.run
+            context,
+            "signals",
+            lambda: SignalPipeline.run(market_status=market_status),
         ):
             return MasterPipeline._finalize(context)
+
+        # ── Step 5: Sector momentum (non-blocking) ────────────────────────
+        # Consumes stock_signals produced in Step 4 — must run after signals.
+        # A scoring failure never aborts the overall pipeline.
+        logger.info("── Step [sector_momentum] starting")
+        try:
+            SectorMomentum.run()
+            context.mark_step_completed("sector_momentum")
+            logger.info("── Step [sector_momentum] completed")
+        except Exception as exc:
+            logger.warning("── Step [sector_momentum] failed (non-blocking): %s", exc)
+            context.add_warning(f"Sector momentum step failed: {exc}")
+            context.mark_step_completed("sector_momentum")
 
         return MasterPipeline._finalize(context)
 

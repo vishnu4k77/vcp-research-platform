@@ -35,6 +35,7 @@ from sqlalchemy import inspect, text
 
 from app.config.db import engine
 from app.config.logging_config import get_logger
+from app.config.strategy_config import DashboardConfig
 
 logger = get_logger("setup_db")
 
@@ -45,6 +46,23 @@ logger = get_logger("setup_db")
 # already exist in the DB before this script was introduced).
 
 TABLE_DDL = {
+
+    # Pipeline execution audit — one row per run, updated at start and end.
+    "pipeline_runs": """
+        CREATE TABLE pipeline_runs (
+            id             BIGINT         IDENTITY(1,1) NOT NULL,
+            run_id         NVARCHAR(50)   NOT NULL,
+            pipeline_name  VARCHAR(100)   NOT NULL,
+            trade_date     DATE           NULL,
+            start_time     DATETIME       NOT NULL CONSTRAINT df_pr_start DEFAULT GETDATE(),
+            end_time       DATETIME       NULL,
+            status         VARCHAR(20)    NOT NULL CONSTRAINT df_pr_status DEFAULT 'RUNNING',
+            rows_processed BIGINT         NOT NULL CONSTRAINT df_pr_rows   DEFAULT 0,
+            error_message  NVARCHAR(2000) NULL,
+            CONSTRAINT pk_pipeline_runs    PRIMARY KEY (id),
+            CONSTRAINT uq_pipeline_run_id  UNIQUE (run_id)
+        )
+    """,
 
     "nse_universe": """
         CREATE TABLE nse_universe (
@@ -93,6 +111,93 @@ TABLE_DDL = {
         )
     """,
 
+    # Fundamentals from Screener.in — one row per symbol per scrape date.
+    # scraped_at tracks when the HTTP fetch happened; trade_date is the reporting
+    # period approximation (set to the scrape date by fetch_fundamentals.py).
+    # STALE_AFTER_DAYS in FundamentalsConfig controls re-scrape cadence.
+    "stock_fundamentals": """
+        CREATE TABLE stock_fundamentals (
+            id                  INT          IDENTITY(1,1) NOT NULL,
+            symbol              VARCHAR(30)  NOT NULL,
+            scraped_at          DATETIME     NOT NULL CONSTRAINT df_sfund_scraped DEFAULT GETDATE(),
+            trade_date          DATE         NOT NULL,
+            roe                 FLOAT        NULL,
+            roce                FLOAT        NULL,
+            debt_to_equity      FLOAT        NULL,
+            sales_growth_3yr    FLOAT        NULL,
+            profit_growth_3yr   FLOAT        NULL,
+            opm                 FLOAT        NULL,
+            eps_ttm             FLOAT        NULL,
+            eps_prev_yr         FLOAT        NULL,
+            promoter_holding    FLOAT        NULL,
+            promoter_pledge_pct FLOAT        NULL,
+            market_cap_cr       FLOAT        NULL,
+            pe_ratio            FLOAT        NULL,
+            quality_score       INT          NULL,
+            CONSTRAINT pk_stock_fundamentals      PRIMARY KEY (id),
+            CONSTRAINT uq_sfund_symbol_trade_date UNIQUE (symbol, trade_date)
+        )
+    """,
+
+    # Fundamental filter thresholds — one row per criterion.
+    # Update threshold values here (or via direct SQL UPDATE) without code changes.
+    # Loaded by screener_service._load_filter_config(); falls back to StrategyConfig defaults.
+    "fundamental_filter_config": """
+        CREATE TABLE fundamental_filter_config (
+            id           INT          IDENTITY(1,1) NOT NULL,
+            filter_name  VARCHAR(50)  NOT NULL,
+            threshold    FLOAT        NOT NULL,
+            description  VARCHAR(200) NULL,
+            is_active    BIT          NOT NULL CONSTRAINT df_ffc_active   DEFAULT 1,
+            updated_at   DATETIME     NOT NULL CONSTRAINT df_ffc_updated  DEFAULT GETDATE(),
+            CONSTRAINT pk_fundamental_filter_config PRIMARY KEY (id),
+            CONSTRAINT uq_ffc_filter_name           UNIQUE (filter_name)
+        )
+    """,
+
+    # Scanner preset weights — one row per (preset_name, signal_name).
+    # Each preset is a named scoring strategy shown in the Scanner sidebar dropdown.
+    # To add a new preset: INSERT rows here. To tune weights: UPDATE threshold.
+    # is_default=1 marks the preset selected on first load; only one row should have 1.
+    # sort_order controls the dropdown ordering across presets.
+    "scanner_preset_config": """
+        CREATE TABLE scanner_preset_config (
+            id           INT          IDENTITY(1,1) NOT NULL,
+            preset_name  VARCHAR(100) NOT NULL,
+            signal_name  VARCHAR(50)  NOT NULL,
+            weight       INT          NOT NULL CONSTRAINT df_spc_weight  DEFAULT 0,
+            is_active    BIT          NOT NULL CONSTRAINT df_spc_active  DEFAULT 1,
+            is_default   BIT          NOT NULL CONSTRAINT df_spc_default DEFAULT 0,
+            sort_order   INT          NOT NULL CONSTRAINT df_spc_sort    DEFAULT 0,
+            updated_at   DATETIME     NOT NULL CONSTRAINT df_spc_updated DEFAULT GETDATE(),
+            CONSTRAINT pk_scanner_preset_config  PRIMARY KEY (id),
+            CONSTRAINT uq_spc_preset_signal      UNIQUE (preset_name, signal_name)
+        )
+    """,
+
+    # Sector rotation scores — one row per (trade_date, sector).
+    # Computed by SectorMomentum after each SignalPipeline run.
+    # momentum_score is the weighted composite; momentum_rank is cross-sector rank (1=best).
+    "sector_momentum": """
+        CREATE TABLE sector_momentum (
+            id                  INT          IDENTITY(1,1) NOT NULL,
+            trade_date          DATE         NOT NULL,
+            sector              VARCHAR(100) NOT NULL,
+            total_stocks        INT          NOT NULL CONSTRAINT df_sm_stocks DEFAULT 0,
+            avg_composite_score FLOAT        NULL,
+            trend_pct           FLOAT        NULL,
+            stage2_pct          FLOAT        NULL,
+            rs_pct              FLOAT        NULL,
+            liquidity_pct       FLOAT        NULL,
+            momentum_score      FLOAT        NULL,
+            momentum_rank       INT          NULL,
+            prev_momentum_score FLOAT        NULL,
+            momentum_delta      FLOAT        NULL,
+            CONSTRAINT pk_sector_momentum      PRIMARY KEY (id),
+            CONSTRAINT uq_sm_date_sector       UNIQUE (trade_date, sector)
+        )
+    """,
+
     # Regime classification config — state_code, score bands, trading environment params.
     # Seeded by _seed_market_states(). Tune exposure/breakout flags directly in SQL.
     "market_states": """
@@ -129,16 +234,24 @@ TABLE_DDL = {
 # Only ADD operations — never drops existing data.
 
 COLUMN_MIGRATIONS = [
-    # stock_features
-    ("stock_features", "weinstein_stage",               "INT   NULL"),
-    # stock_signals
-    ("stock_signals",  "ema_alignment_signal",           "BIT   NULL"),
-    ("stock_signals",  "volume_contraction_signal",      "BIT   NULL"),
-    ("stock_signals",  "volatility_contraction_signal",  "BIT   NULL"),
-    ("stock_signals",  "breakout_ready_signal",          "BIT   NULL"),
-    ("stock_signals",  "rs_signal",                      "BIT   NULL"),
-    ("stock_signals",  "distance_from_pivot_pct",        "FLOAT NULL"),
-    ("stock_signals",  "distance_from_52w_high_pct",     "FLOAT NULL"),
+    # stock_features — indicator columns
+    ("stock_features", "weinstein_stage",              "INT   NULL"),
+    # stock_features — 52-week price context (computed by VolatilityFeature)
+    ("stock_features", "high_52w",                     "FLOAT NULL"),
+    ("stock_features", "low_52w",                      "FLOAT NULL"),
+    # stock_signals — sub-signal transparency columns
+    ("stock_signals",  "ema_alignment_signal",         "BIT   NULL"),
+    ("stock_signals",  "volume_contraction_signal",    "BIT   NULL"),
+    ("stock_signals",  "volatility_contraction_signal","BIT   NULL"),
+    ("stock_signals",  "breakout_ready_signal",        "BIT   NULL"),
+    ("stock_signals",  "rs_signal",                    "BIT   NULL"),
+    ("stock_signals",  "distance_from_pivot_pct",      "FLOAT NULL"),
+    ("stock_signals",  "distance_from_52w_high_pct",   "FLOAT NULL"),
+    # stock_fundamentals — quarterly EPS acceleration flag (1=accelerating, 0=not, NULL=no data)
+    ("stock_fundamentals", "eps_acceleration",         "BIT   NULL"),
+    # stock_signals — Stage 2 age: how long the current consecutive Stage 2 run has been active
+    ("stock_signals", "stage2_days",          "INT  NULL"),   # trading days in current S2 streak
+    ("stock_signals", "stage2_started_date",  "DATE NULL"),   # first date of current S2 streak
 ]
 
 
@@ -157,7 +270,11 @@ REQUIRED_TABLES = [
     "nse_universe",          # ticker master — source of truth for the ingestion loop
     "nse_index_ref",         # index reference (NIFTY500, MIDCAP150, …)
     "nse_index_membership",  # normalized per-(symbol, index_code) constituency
-    "market_states",         # regime scoring thresholds + trading env params
+    "market_states",              # regime scoring thresholds + trading env params
+    "stock_fundamentals",         # Screener.in fundamentals — scraped monthly
+    "fundamental_filter_config",  # fundamental threshold config — editable in SQL
+    "scanner_preset_config",      # scanner preset weights — editable in SQL without code changes
+    "sector_momentum",            # sector rotation scores — computed after each signal run
 ]
 
 
@@ -182,6 +299,23 @@ _NSE_INDEX_REF_SEED = [
     ("NIFTY500",    "NIFTY 500"),
     ("MIDCAP150",   "NIFTY Midcap 150"),
     ("SMALLCAP250", "NIFTY Smallcap 250"),
+]
+
+# Fundamental filter thresholds — 1 point per criterion, max 10.
+# quality_pass_score: minimum criteria count for quality_signal = 1.
+# Edit directly in SQL: UPDATE fundamental_filter_config SET threshold = X WHERE filter_name = 'Y'
+_FUNDAMENTAL_FILTER_SEED = [
+    # (filter_name, threshold, description)
+    ("roe_min",              12.0, "Min Return on Equity % (>=)"),
+    ("roce_min",             12.0, "Min Return on Capital Employed % (>=)"),
+    ("debt_to_equity_max",    1.0, "Max Debt-to-Equity ratio (<=)"),
+    ("sales_growth_min",     10.0, "Min 3-year Sales CAGR % (>=)"),
+    ("profit_growth_min",    10.0, "Min 3-year Profit CAGR % (>=)"),
+    ("promoter_holding_min", 40.0, "Min Promoter Holding % (>=)"),
+    ("promoter_pledge_max",  20.0, "Max Promoter Pledge % (<=)"),
+    ("opm_min",              10.0, "Min Operating Profit Margin % (>=)"),
+    ("market_cap_min_cr",   500.0, "Min Market Cap in Crores (>=)"),
+    ("quality_pass_score",    6.0, "Min criteria count (out of 10) for quality_signal = 1"),
 ]
 
 
@@ -234,6 +368,79 @@ def _seed_market_states() -> None:
 
     except Exception as exc:
         logger.error("market_states seed failed: %s", exc, exc_info=True)
+
+
+def _seed_fundamental_filters() -> None:
+    """Insert default fundamental filter thresholds if the table is empty."""
+    try:
+        with engine.begin() as conn:
+            count = conn.execute(text("SELECT COUNT(*) FROM fundamental_filter_config")).scalar()
+            if count > 0:
+                logger.info("fundamental_filter_config already seeded (%d rows) — skipping", count)
+                return
+
+            for filter_name, threshold, description in _FUNDAMENTAL_FILTER_SEED:
+                conn.execute(
+                    text(
+                        "INSERT INTO fundamental_filter_config "
+                        "(filter_name, threshold, description, is_active) "
+                        "VALUES (:name, :threshold, :desc, 1)"
+                    ),
+                    {"name": filter_name, "threshold": threshold, "desc": description},
+                )
+
+        logger.info("fundamental_filter_config seeded with %d rows", len(_FUNDAMENTAL_FILTER_SEED))
+
+    except Exception as exc:
+        logger.error("fundamental_filter_config seed failed: %s", exc, exc_info=True)
+
+
+def _seed_scanner_presets() -> None:
+    """Insert scanner preset weights from DashboardConfig if the table is empty.
+
+    Flattens DashboardConfig.SCANNER_PRESETS into one row per (preset, signal).
+    The first preset in the dict gets is_default=1.
+    sort_order is assigned by preset position so the dropdown order matches code.
+
+    To add a new preset without code changes:
+        INSERT INTO scanner_preset_config (preset_name, signal_name, weight, sort_order)
+        VALUES ('My Preset', 'trend_signal', 30, 6), ...
+    """
+    try:
+        with engine.begin() as conn:
+            count = conn.execute(text("SELECT COUNT(*) FROM scanner_preset_config")).scalar()
+            if count > 0:
+                logger.info("scanner_preset_config already seeded (%d rows) — skipping", count)
+                return
+
+            preset_names = list(DashboardConfig.SCANNER_PRESETS.keys())
+            for sort_idx, preset_name in enumerate(preset_names, start=1):
+                weights = DashboardConfig.SCANNER_PRESETS[preset_name]
+                is_default = 1 if sort_idx == 1 else 0
+                for signal_name, weight in weights.items():
+                    conn.execute(
+                        text(
+                            "INSERT INTO scanner_preset_config "
+                            "(preset_name, signal_name, weight, is_active, is_default, sort_order) "
+                            "VALUES (:preset, :signal, :weight, 1, :is_default, :sort)"
+                        ),
+                        {
+                            "preset":     preset_name,
+                            "signal":     signal_name,
+                            "weight":     weight,
+                            "is_default": is_default,
+                            "sort":       sort_idx,
+                        },
+                    )
+
+        total = sum(len(v) for v in DashboardConfig.SCANNER_PRESETS.values())
+        logger.info(
+            "scanner_preset_config seeded | presets=%d | rows=%d",
+            len(DashboardConfig.SCANNER_PRESETS), total,
+        )
+
+    except Exception as exc:
+        logger.error("scanner_preset_config seed failed: %s", exc, exc_info=True)
 
 
 def _seed_nse_index_ref() -> None:
@@ -333,6 +540,165 @@ def _run_column_migrations() -> None:
         logger.info("No column migrations needed — schema is current")
 
 
+# ── Performance indexes ───────────────────────────────────────────────────────
+# Format: (index_name, table_name, CREATE INDEX DDL)
+# _create_indexes() checks sys.indexes before executing — fully idempotent.
+
+INDEX_DEFINITIONS: list[tuple[str, str, str]] = [
+
+    # stock_signals — scanner filters by trade_date + composite_score (no existing index!)
+    # Every scanner page-load did a full table scan before this.
+    (
+        "ix_ss_date_score",
+        "stock_signals",
+        """
+        CREATE NONCLUSTERED INDEX ix_ss_date_score
+            ON stock_signals (trade_date ASC, composite_score DESC)
+            INCLUDE (
+                symbol, institutional_candidate,
+                trend_signal, stage2_signal, vcp_signal, breakout_signal,
+                breakout_ready_signal, liquidity_signal, quality_signal, rs_signal,
+                distance_from_pivot_pct, distance_from_52w_high_pct, stage2_days
+            )
+        """,
+    ),
+
+    # stock_signals — backtest entry query: WHERE trade_date BETWEEN ... AND signal=1 AND score>=N
+    # Separate index so the query planner can use the entry_signal column cheaply.
+    (
+        "ix_ss_date_signal_score",
+        "stock_signals",
+        """
+        CREATE NONCLUSTERED INDEX ix_ss_date_signal_score
+            ON stock_signals (trade_date ASC, composite_score ASC)
+            INCLUDE (symbol, breakout_signal, vcp_signal, breakout_ready_signal, stage2_days)
+        """,
+    ),
+
+    # daily_price_data — backtest bulk-loads OHLCV for hundreds of symbols.
+    # The existing uq_symbol_date unique index has no INCLUDE, so every row
+    # required a RID/key lookup for high/low/close. This covering index eliminates that.
+    (
+        "ix_dpd_symbol_date_covering",
+        "daily_price_data",
+        """
+        CREATE NONCLUSTERED INDEX ix_dpd_symbol_date_covering
+            ON daily_price_data (symbol ASC, trade_date ASC)
+            INCLUDE (open_price, high_price, low_price, close_price, volume)
+        """,
+    ),
+
+    # stock_features — stock detail chart loads feature history per symbol descending.
+    # The existing uq_stock_feature (symbol, trade_date) doesn't INCLUDE price/EMA columns.
+    (
+        "ix_sf_symbol_date_covering",
+        "stock_features",
+        """
+        CREATE NONCLUSTERED INDEX ix_sf_symbol_date_covering
+            ON stock_features (symbol ASC, trade_date DESC)
+            INCLUDE (
+                close_price, ema_10, ema_21, ema_50, ema_150, ema_200,
+                atr_14, volatility_contraction, high_52w, low_52w,
+                avg_volume_20, relative_volume
+            )
+        """,
+    ),
+
+    # market_regime — had ZERO indexes. Market Overview fetches TOP 1 ORDER BY trade_date DESC.
+    (
+        "ix_market_regime_date",
+        "market_regime",
+        """
+        CREATE NONCLUSTERED INDEX ix_market_regime_date
+            ON market_regime (trade_date DESC)
+            INCLUDE (market_status, regime_score, nifty_above_50ema, nifty_above_200ema)
+        """,
+    ),
+
+    # market_environment — had ZERO indexes. Same TOP 1 pattern.
+    (
+        "ix_market_environment_date",
+        "market_environment",
+        """
+        CREATE NONCLUSTERED INDEX ix_market_environment_date
+            ON market_environment (trade_date DESC)
+            INCLUDE (
+                market_state, regime_score, exposure_level,
+                allow_breakouts, allow_pyramiding, cash_mode
+            )
+        """,
+    ),
+
+    # nse_universe — scanner JOINs on symbol but the existing uq_nse_symbol has no INCLUDEs.
+    # Adding company_name + sector eliminates a lookup per scanner row.
+    (
+        "ix_nu_symbol_covering",
+        "nse_universe",
+        """
+        CREATE NONCLUSTERED INDEX ix_nu_symbol_covering
+            ON nse_universe (symbol ASC)
+            INCLUDE (company_name, sector, is_active)
+        """,
+    ),
+
+    # stock_fundamentals — fundamentals panel fetches TOP 1 ORDER BY trade_date DESC per symbol.
+    # Existing uq_sfund_symbol_trade_date is (symbol, trade_date ASC); adding DESC variant helps.
+    (
+        "ix_sfund_symbol_date_desc",
+        "stock_fundamentals",
+        """
+        CREATE NONCLUSTERED INDEX ix_sfund_symbol_date_desc
+            ON stock_fundamentals (symbol ASC, trade_date DESC)
+            INCLUDE (
+                roe, roce, debt_to_equity, sales_growth_3yr, profit_growth_3yr,
+                opm, eps_ttm, promoter_holding, promoter_pledge_pct,
+                market_cap_cr, pe_ratio, quality_score, eps_acceleration, scraped_at
+            )
+        """,
+    ),
+]
+
+
+def _create_indexes() -> None:
+    """Create all performance indexes that don't already exist (idempotent).
+
+    Checks sys.indexes by name before executing each CREATE INDEX so it is
+    safe to run multiple times (e.g. repeated setup_db.py runs).
+    """
+    applied = skipped = failed = 0
+
+    for index_name, table_name, ddl in INDEX_DEFINITIONS:
+        try:
+            with engine.connect() as conn:
+                exists = conn.execute(
+                    text(
+                        "SELECT 1 FROM sys.indexes "
+                        "WHERE name = :name AND object_id = OBJECT_ID(:tbl)"
+                    ),
+                    {"name": index_name, "tbl": table_name},
+                ).fetchone()
+
+            if exists:
+                logger.debug("Index %-50s already exists — skipping", index_name)
+                skipped += 1
+                continue
+
+            with engine.begin() as conn:
+                conn.execute(text(ddl))
+
+            logger.info("CREATED  %-50s on %s", index_name, table_name)
+            applied += 1
+
+        except Exception as exc:
+            logger.error("FAILED   %-50s: %s", index_name, exc)
+            failed += 1
+
+    logger.info(
+        "Index pass complete — created=%d  skipped=%d  failed=%d",
+        applied, skipped, failed,
+    )
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -363,6 +729,11 @@ def main() -> int:
     print("\nSeeding reference data:")
     _seed_market_states()
     _seed_nse_index_ref()
+    _seed_fundamental_filters()
+    _seed_scanner_presets()
+
+    print("\nCreating performance indexes:")
+    _create_indexes()
 
     print("\nSetup complete.")
     print("Next steps:")

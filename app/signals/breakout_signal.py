@@ -1,3 +1,5 @@
+"""Stage 2 resistance-breakout signal — Weinstein / O'Neil methodology."""
+
 import numpy as np
 import pandas as pd
 
@@ -8,24 +10,27 @@ logger = get_logger(__name__)
 
 
 class BreakoutSignal:
-    """
-    Stage 2 Resistance Breakout — Weinstein / O'Neil methodology.
+    """Detects confirmed resistance breakouts and breakout-ready setups.
 
-    A valid breakout requires:
-      1. EMA stack aligned (50 > 150 > 200), price above 200 EMA.
-      2. Close breaks above prior N-bar resistance (no lookahead).
-      3. Volume surge on breakout day (relative_volume ≥ threshold).
-      4. Not overextended (close ≤ EMA50 * (1 + extension_limit)).
+    A valid breakout requires all four conditions simultaneously:
+      1. EMA stack aligned: EMA50 > EMA150 > EMA200, close above EMA200.
+      2. Close breaks above prior BREAKOUT_LOOKBACK-bar resistance (no lookahead).
+      3. Volume surge on breakout day (relative_volume ≥ BREAKOUT_VOLUME_MULTIPLIER).
+      4. Not overextended: close ≤ EMA50 × (1 + BREAKOUT_MAX_EXTENSION_FROM_50EMA).
+
+    Uses high_52w from stock_features (pre-computed by VolatilityFeature) to
+    avoid duplicate rolling computation.
 
     Produces four columns:
-      breakout_signal          — confirmed breakout (all conditions met)
-      breakout_ready_signal    — price within 3% of resistance, not broken yet
-      distance_from_pivot_pct  — % distance from resistance (+ = above)
-      distance_from_52w_high_pct — % distance from 52-week high
+        breakout_signal           — confirmed breakout (all conditions met)
+        breakout_ready_signal     — within BREAKOUT_NEAR_RESISTANCE_THRESHOLD of pivot
+        distance_from_pivot_pct   — % distance from resistance pivot (+ = above)
+        distance_from_52w_high_pct — % distance from 52-week high
     """
 
-    REQUIRED_COLUMNS = [
+    REQUIRED_COLUMNS: list[str] = [
         "close_price",
+        "high_52w",
         "ema_50",
         "ema_150",
         "ema_200",
@@ -34,18 +39,30 @@ class BreakoutSignal:
 
     @staticmethod
     def validate(df: pd.DataFrame) -> None:
+        """Raise ValueError if any required column is absent.
 
-        missing = [
-            col for col in BreakoutSignal.REQUIRED_COLUMNS
-            if col not in df.columns
-        ]
+        Args:
+            df: Input DataFrame to validate.
 
+        Raises:
+            ValueError: If one or more REQUIRED_COLUMNS are missing.
+        """
+        missing = [c for c in BreakoutSignal.REQUIRED_COLUMNS if c not in df.columns]
         if missing:
             raise ValueError(f"BreakoutSignal missing columns: {missing}")
 
     @staticmethod
     def calculate(df: pd.DataFrame) -> pd.DataFrame:
+        """Compute breakout signals for a single symbol's full price history.
 
+        Args:
+            df: Feature DataFrame for a single symbol, sorted ascending by
+                trade_date. Must contain REQUIRED_COLUMNS.
+
+        Returns:
+            df with breakout_signal, breakout_ready_signal,
+            distance_from_pivot_pct, distance_from_52w_high_pct appended.
+        """
         if df.empty:
             return df
 
@@ -67,13 +84,8 @@ class BreakoutSignal:
         )
         safe_resistance = resistance.replace(0, np.nan)
 
-        # ── 52-week context ───────────────────────────────────────────────
-        high_52w = (
-            df["close_price"]
-            .rolling(StrategyConfig.STAGE_LOOKBACK, min_periods=63)
-            .max()
-        )
-        safe_52w = high_52w.replace(0, np.nan)
+        # ── 52-week high from pre-computed feature (DRY — no duplicate rolling) ──
+        safe_52w = df["high_52w"].replace(0, np.nan)
 
         df["distance_from_52w_high_pct"] = (
             (df["close_price"] - safe_52w) / safe_52w * 100
@@ -84,33 +96,30 @@ class BreakoutSignal:
         ).round(2)
 
         # ── Extension guard ───────────────────────────────────────────────
-        # Avoid chasing stocks already >10% above EMA 50
         safe_ema50 = df["ema_50"].replace(0, np.nan)
         extension_from_50ema = (df["close_price"] - safe_ema50) / safe_ema50
         not_extended = (
             extension_from_50ema <= StrategyConfig.BREAKOUT_MAX_EXTENSION_FROM_50EMA
         )
 
-        # ── Uptrend prerequisite ─────────────────────────────────────────
+        # ── Uptrend prerequisite ──────────────────────────────────────────
         uptrend = (
-            (df["ema_50"] > df["ema_150"])
+            (df["ema_50"]  > df["ema_150"])
             & (df["ema_150"] > df["ema_200"])
             & (df["close_price"] > df["ema_200"])
         )
 
         # ── Breakout conditions ───────────────────────────────────────────
         price_breakout = df["close_price"] > safe_resistance
-        volume_surge = (
-            df["relative_volume"] >= StrategyConfig.BREAKOUT_VOLUME_MULTIPLIER
-        )
+        volume_surge = df["relative_volume"] >= StrategyConfig.BREAKOUT_VOLUME_MULTIPLIER
 
         df["breakout_signal"] = np.where(
-            (uptrend & price_breakout & volume_surge & not_extended),
+            uptrend & price_breakout & volume_surge & not_extended,
             1,
             0,
         )
 
-        # ── Breakout-ready: approaching resistance, not yet broken ────────
+        # ── Breakout-ready: approaching pivot, not yet broken ─────────────
         near_resistance = (
             safe_resistance.notna()
             & (
@@ -121,7 +130,7 @@ class BreakoutSignal:
         )
 
         df["breakout_ready_signal"] = np.where(
-            (uptrend & near_resistance),
+            uptrend & near_resistance,
             1,
             0,
         )
