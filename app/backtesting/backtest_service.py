@@ -14,7 +14,7 @@ from typing import Optional
 import pandas as pd
 from sqlalchemy import text
 
-from app.config.db import engine
+from app.config.db import nolock_connect
 from app.config.logging_config import get_logger
 from app.config.strategy_config import BacktestConfig, StrategyConfig
 
@@ -41,7 +41,7 @@ class BacktestService:
             "SELECT MIN(trade_date), MAX(trade_date) FROM stock_signals"
         )
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 row = conn.execute(query).fetchone()
             if row and row[0] and row[1]:
                 return row[0], row[1]
@@ -115,7 +115,7 @@ class BacktestService:
         """)
 
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 df = pd.read_sql(
                     query,
                     conn,
@@ -188,7 +188,7 @@ class BacktestService:
             """)
 
             try:
-                with engine.connect() as conn:
+                with nolock_connect() as conn:
                     result = conn.execute(
                         query,
                         {"from_date": from_date, "to_date": to_date, **sym_params},

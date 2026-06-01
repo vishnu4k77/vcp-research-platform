@@ -21,6 +21,8 @@ from app.signals.liquidity_signal import LiquiditySignal
 from app.signals.quality_signal import QualitySignal, _load_latest_quality_scores, _load_quality_pass_score
 from app.signals.breakout_signal import BreakoutSignal
 from app.signals.rs_signal import RSSignal
+from app.signals.minervini_signal import MinerviniSignal
+from app.signals.darvas_signal import DarvasSignal
 from app.signals.composite_ranker import CompositeRanker
 
 logger = get_logger(__name__)
@@ -30,25 +32,32 @@ class SignalPipeline:
     """Consumes stock_features rows, applies all signal detectors, persists to stock_signals.
 
     Signal execution order matters — later signals consume outputs from earlier ones:
-      1. TrendSignal    → trend_signal
-      2. StageSignal    → stage2_signal  (reads EMA columns)
-      3. VCPSignal      → vcp_signal     (reads stage2_signal)
-      4. LiquiditySignal → liquidity_signal
-      5. QualitySignal  → quality_signal  (reads stage2_signal, trend_score)
-      6. BreakoutSignal → breakout_signal (reads high_52w from features)
-      7. RSSignal       → rs_signal       (reads Nifty returns series)
-      8. CompositeRanker → composite_score, composite_rank, institutional_candidate
+      1.  TrendSignal     → trend_signal
+      2.  StageSignal     → stage2_signal      (reads EMA columns)
+      3.  _stage2_age     → stage2_days/date   (reads stage2_signal)
+      4.  VCPSignal       → vcp_signal         (reads stage2_signal; pre-earnings guard)
+      5.  LiquiditySignal → liquidity_signal
+      6.  QualitySignal   → quality_signal     (reads stage2_signal, trend_score)
+      7.  BreakoutSignal  → breakout_signal    (reads high_52w from features)
+      8.  RSSignal        → rs_signal, rs_value, rs_new_high  (reads Nifty series)
+      9.  MinerviniSignal → minervini_signal   (reads rs_signal — must follow RSSignal)
+      10. DarvasSignal    → darvas_signal      (reads high_52w, ema_150)
+      11. CompositeRanker → composite_score, composite_rank, institutional_candidate
     """
 
     REQUIRED_COLUMNS: list[str] = [
         "symbol",
         "trade_date",
+        "open_price",
+        "high_price",
+        "low_price",
         "close_price",
         "ema_10",
         "ema_21",
         "ema_50",
         "ema_150",
         "ema_200",
+        "avg_volume_10",   # used by BreakoutSignal base volume dry-up guard
         "avg_volume_20",
         "relative_volume",
         "atr_14",
@@ -56,6 +65,8 @@ class SignalPipeline:
         "volatility_contraction",
         "trend_score",
         "high_52w",        # pre-computed 52-week high (consumed by BreakoutSignal)
+        "low_52w",         # pre-computed 52-week low (consumed by BreakoutSignal prior-uptrend guard)
+        "is_earnings_day", # 1 on earnings release day — suppresses breakout signal
     ]
 
     # Columns persisted to stock_signals — must match what the signal chain produces.
@@ -85,6 +96,11 @@ class SignalPipeline:
         # Stage 2 age — consecutive trading days in current Stage 2 run
         "stage2_days",
         "stage2_started_date",
+        # Phase 2A additions — RS value + new strategy signals
+        "rs_value",         # excess return vs Nifty 50 (float, %)
+        "rs_new_high",      # rs_value at 52w rolling max (BIT)
+        "minervini_signal", # all 8 Trend Template conditions (BIT)
+        "darvas_signal",    # Darvas box breakout near 52w high (BIT)
     ]
 
     # ── Data loading ──────────────────────────────────────────────────────────
@@ -101,6 +117,9 @@ class SignalPipeline:
             SELECT
                 symbol,
                 trade_date,
+                open_price,
+                high_price,
+                low_price,
                 close_price,
                 volume,
                 ema_10,
@@ -118,7 +137,8 @@ class SignalPipeline:
                 volatility_contraction,
                 weinstein_stage,
                 high_52w,
-                low_52w
+                low_52w,
+                ISNULL(is_earnings_day, 0) AS is_earnings_day
             FROM stock_features
             ORDER BY symbol, trade_date ASC
         """)
@@ -326,6 +346,9 @@ class SignalPipeline:
             symbol_df = QualitySignal.calculate(symbol_df, fundamental_scores, quality_pass_score)
             symbol_df = BreakoutSignal.calculate(symbol_df)
             symbol_df = RSSignal.calculate(symbol_df, nifty_returns)
+            # MinerviniSignal must follow RSSignal — uses rs_signal (condition 8)
+            symbol_df = MinerviniSignal.calculate(symbol_df)
+            symbol_df = DarvasSignal.calculate(symbol_df)
             symbol_df = CompositeRanker.calculate(symbol_df)
             return symbol_df
 

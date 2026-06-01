@@ -42,6 +42,61 @@ class StrategyConfig:
     BREAKOUT_VOLUME_MULTIPLIER = 1.5        # relative_volume required on breakout day
     BREAKOUT_MAX_EXTENSION_FROM_50EMA = 0.10  # max 10% above EMA 50 (avoid chasing)
     BREAKOUT_NEAR_RESISTANCE_THRESHOLD = 0.03  # within 3% of resistance = breakout ready
+    # Candle quality guards (gap-trap protection)
+    BREAKOUT_CLOSE_POSITION_MIN = 0.50      # close must be in upper 50% of day's range
+    BREAKOUT_MAX_GAP_PCT = 0.03             # gap-and-fail: if open gaps >3% AND closes below open → trap
+    # Stage 2 age gate — breakouts from late Stage 2 (>60 days) are entering
+    # Stage 3 distribution.  Reuses STAGE2_MID_MAX_DAYS so the cutoff stays
+    # consistent between the scanner colour-coding and the signal filter.
+    # 0 = not in Stage 2 (allowed — might be entering Stage 2 right now).
+    # Tune via STAGE2_MID_MAX_DAYS (currently 60).
+    BREAKOUT_MAX_STAGE2_AGE_DAYS: int = 60  # alias of STAGE2_MID_MAX_DAYS for clarity
+
+    # Volume dry-up in base — quiet accumulation before a breakout.
+    # Ratio: avg_volume_10 / avg_volume_20.
+    # < 0.75 = recent 10-day avg is below the 20-day avg → volume contracting → healthy.
+    # > 0.75 = volume still elevated → distribution risk, not quiet accumulation.
+    BREAKOUT_BASE_VOLUME_DRY_UP: float = 0.75
+
+    # Minervini Trend Template — missing conditions added to breakout_signal:
+    #   Condition 6: close must be above EMA50 (stock still in near-term uptrend)
+    #   Condition 8: close must be within 25% of 52-week high (near new highs,
+    #                NOT recovering from a crash — eliminates post-crash bounce entries)
+    # Source: "Trade Like a Stock Market Wizard" (Minervini, 2013)
+    BREAKOUT_CLOSE_ABOVE_50EMA: bool = True      # enforce cond 6 (close > ema_50)
+    BREAKOUT_NEAR_52W_HIGH_MAX: float = 0.25     # cond 8: max 25% below 52w high
+
+    # Earnings-day filter — uses is_earnings_day flag from stock_features.
+    # is_earnings_day is populated by EarningsService from Yahoo Finance earnings_dates.
+    # Minervini: never enter on the earnings day; volume is event-driven, not accumulation.
+    BREAKOUT_FILTER_EARNINGS_DAYS: bool = True
+
+    # ── Base quality filters (pivot quality) ──────────────────────────────────
+    # O'Neil / Minervini: a valid breakout requires a proper consolidation BASE,
+    # not just any 20-day high.  These two guards eliminate the two most common
+    # false-breakout scenarios:
+    #
+    #   Scenario A — post-crash recovery:
+    #     Stock gaps down on news, bounces for 10 days, hits the 20-day max.
+    #     No real base formed.  fix: prior uptrend minimum.
+    #
+    #   Scenario B — choppy range:
+    #     Stock oscillates in a wide range for weeks with no directional bias.
+    #     fix: tight base range (max 15% spread inside the 20-day window).
+    #
+    # Tune both thresholds here without touching signal logic.
+
+    # Maximum allowed price range inside the 20-day base window.
+    # Formula: (rolling_max_close - rolling_min_close) / rolling_max_close
+    # < 0.15 = tight consolidation (flat base or handle)
+    # > 0.15 = wide chop / V-shaped recovery → reject
+    BREAKOUT_MAX_BASE_RANGE_PCT: float = 0.15
+
+    # Minimum gain from the 52-week low before a breakout is valid.
+    # A stock only 10% above its yearly low has no institutional accumulation.
+    # O'Neil: the stock must have a prior meaningful uptrend before forming the base.
+    # 0.30 = stock must be 30%+ above its 52-week low.
+    BREAKOUT_PRIOR_UPTREND_MIN: float = 0.30
 
     # Weinstein stage classification
     STAGE_EMA200_SLOPE_NEUTRAL_BAND = 0.50  # % change over EMA_SLOPE_PERIOD considered flat
@@ -80,13 +135,20 @@ class StrategyConfig:
     # Safe range: 2–5. Higher values do NOT increase Yahoo throughput.
     INGESTION_MAX_WORKERS = 4
 
+    # Gap detection lookback — how many recent NSE trading days to audit after
+    # each ingestion run.  DataGapFiller queries market_regime for this many
+    # trading days and verifies every active ticker has a row for each.
+    # 5 = catches gaps from this week.  Increase to 10 to audit 2 full weeks.
+    INGESTION_GAP_CHECK_DAYS: int = 5
+
     # Data quality thresholds (applied during ingestion)
     DATA_QUALITY_MAX_DAILY_MOVE_RATIO = 5.0
     DATA_QUALITY_MAX_VOLUME_MULTIPLIER = 100.0
 
     # SQL Server bulk-insert batch size.
-    # Limit: 2100 params / ~20 columns = 105 rows max per statement.
-    SQL_BATCH_SIZE = 100
+    # Limit: 2100 params / 24 columns (open/high/low/is_earnings_day added) = 87 rows max.
+    # Using 80 for headroom against future column additions.
+    SQL_BATCH_SIZE = 80
 
     # Fundamental filters — used by QualitySignal when stock_fundamentals data exists.
     # All numeric thresholds are config-driven so changes never require code edits.
@@ -201,6 +263,29 @@ class BacktestConfig:
     PRICE_LOAD_BATCH_SIZE: int = 2000
 
 
+class EarningsConfig:
+    """Yahoo Finance earnings dates fetch and caching settings."""
+
+    # Re-fetch a symbol's earnings dates if the last fetch was older than this.
+    # Quarterly cadence means weekly refresh is more than sufficient.
+    STALE_AFTER_DAYS: int = 7
+
+    # Seconds between Yahoo Finance Ticker() calls (separate from OHLCV rate limit).
+    RATE_LIMIT_SECONDS: float = 2.0
+
+    # Tenacity retry settings for transient Yahoo failures
+    RETRY_ATTEMPTS: int = 3
+    RETRY_MIN_WAIT_SECONDS: int = 3
+    RETRY_MAX_WAIT_SECONDS: int = 30
+
+    # SQL bulk-insert batch size for stock_earnings_dates
+    SQL_BATCH_SIZE: int = 100
+
+    # Discard earnings dates further in the future than this many days.
+    # Keeps the table clean of Yahoo's speculative far-future estimates.
+    MAX_FUTURE_DAYS: int = 365
+
+
 class DashboardConfig:
     """Streamlit dashboard UI parameters — all tuneable without code changes."""
 
@@ -297,4 +382,100 @@ class DashboardConfig:
             "breakout_signal":  10,
             "rs_signal":         0,
         },
+
+        # Minervini A+: all 8 Trend Template conditions met + VCP coiling.
+        # Highest quality setup — stock must pass every structural test.
+        "Minervini A+": {
+            "minervini_signal": 50,
+            "vcp_signal":       30,
+            "rs_signal":        20,
+        },
+
+        # Darvas Breakout: near 52w highs, box formed, breakout on volume.
+        # Pure price-action momentum — no fundamental filter.
+        "Darvas Breakout": {
+            "darvas_signal":    60,
+            "minervini_signal": 30,
+            "rs_signal":        10,
+        },
     }
+
+
+class MinerviniConfig:
+    """Minervini Trend Template — 8-condition qualification filter.
+
+    Source: 'Trade Like a Stock Market Wizard' (Minervini, 2013).
+    All thresholds are config-driven — tune in this class without touching
+    any signal logic.
+
+    Conditions mapped to our data:
+      1. close > EMA150  AND  close > EMA200
+      2. EMA150 > EMA200
+      3. EMA200 slope positive for at least EMA200_RISING_LOOKBACK bars
+      4. EMA50 > EMA150  AND  EMA50 > EMA200
+      5. close > EMA50
+      6. close >= 52w_low * (1 + MIN_GAIN_FROM_52W_LOW)
+      7. close <= 52w_high * (1 + MAX_BELOW_52W_HIGH)  [i.e. within X% of high]
+      8. rs_signal = 1  (stock outperforms Nifty 50)
+    """
+
+    # Condition 3: EMA200 must be higher than it was this many bars ago.
+    # 20 bars ≈ 1 calendar month — sufficient to confirm a rising 200-day MA.
+    EMA200_RISING_LOOKBACK: int = 20
+
+    # Condition 6: minimum gain from 52-week low before a setup is valid.
+    # A stock 10% above its yearly low has no institutional accumulation.
+    # 0.30 = must be 30%+ above 52w low (prior meaningful uptrend exists).
+    MIN_GAIN_FROM_52W_LOW: float = 0.30
+
+    # Condition 7: maximum % below 52-week high.
+    # Stocks near new highs have no overhead supply.
+    # 0.25 = must be within 25% of 52w high.
+    MAX_BELOW_52W_HIGH: float = 0.25
+
+    # Condition 8 proxy: stock must outperform Nifty 50 (rs_signal = 1).
+    # Set False to skip the RS check (useful for testing conditions 1-7 only).
+    REQUIRE_RS_OUTPERFORMANCE: bool = True
+
+    # rs_new_high lookback: how many bars of RS history to compare for new high.
+    # 252 = 1 trading year — consistent with IBD 52-week RS Line comparison.
+    # min_periods = RS_NEW_HIGH_LOOKBACK // 2 (126) so new stocks get partial coverage.
+    RS_NEW_HIGH_LOOKBACK: int = 252
+
+
+class DarvasConfig:
+    """Darvas Box breakout — stocks near 52-week highs, box consolidation, breakout on volume.
+
+    Source: 'How I Made $2,000,000 in the Stock Market' (Darvas, 1960).
+    Key insight: stocks at/near new 52w highs have no overhead supply — every
+    shareholder is sitting on a profit and has no incentive to sell at a loss.
+    A tight consolidation (box) followed by a volume breakout is the entry trigger.
+
+    Difference vs BreakoutSignal:
+      - BreakoutSignal allows up to 25% below 52w high; DarvasSignal requires 10%.
+      - DarvasSignal targets stocks hitting NEW highs, not recovering from lows.
+      - Less restrictive on EMA stack (only requires close > EMA150).
+    """
+
+    # Maximum % below 52-week high.  Darvas specifically traded near new highs.
+    # 0.10 = within 10% of the 52w high.
+    NEAR_HIGH_MAX_PCT: float = 0.10
+
+    # Box definition: (box_top - box_bottom) / box_top must be below this.
+    # 0.12 = 12% max price range inside the consolidation window.
+    BOX_RANGE_MAX_PCT: float = 0.12
+
+    # Number of prior bars that define the box (consolidation window).
+    # 20 bars ≈ 4 calendar weeks.
+    BOX_LOOKBACK: int = 20
+
+    # Relative volume required on the breakout day.
+    # 1.5 = 1.5× the 20-day average — confirms institutional participation.
+    VOLUME_MULTIPLIER: float = 1.5
+
+    # Basic EMA prerequisite: close must be above EMA150 (intermediate uptrend).
+    # Less strict than BreakoutSignal's full EMA50 > EMA150 > EMA200 stack.
+    REQUIRE_ABOVE_EMA150: bool = True
+
+    # Suppress Darvas breakout on earnings day (event-driven volume ≠ accumulation).
+    FILTER_EARNINGS_DAYS: bool = True

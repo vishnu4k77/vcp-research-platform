@@ -32,8 +32,19 @@ logger = get_logger(__name__)
     before_sleep=before_sleep_log(logger, 20),  # 20 = logging.WARNING
 )
 def _yf_download(ticker: str, **kwargs) -> pd.DataFrame:
-    """Single yf.download attempt — wrapped externally with retry."""
-    return yf.download(tickers=ticker, **kwargs)
+    """Single yf.download attempt — wrapped externally with retry.
+
+    yfinance returns an empty DataFrame (no exception) when data is unavailable,
+    e.g. temporary Yahoo outage or "possibly delisted" false positive.
+    Raising ValueError here converts that silent empty-return into a retryable
+    event so all YAHOO_RETRY_ATTEMPTS are used before giving up.
+    """
+    result = yf.download(tickers=ticker, **kwargs)
+    if result.empty:
+        raise ValueError(
+            f"yf.download returned empty DataFrame for {ticker} — may be temporary"
+        )
+    return result
 
 
 class YahooFinanceService:

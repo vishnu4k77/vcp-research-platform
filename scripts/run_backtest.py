@@ -118,6 +118,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help=f"Min composite_score threshold. Default: {BacktestConfig.MIN_COMPOSITE_SCORE}",
     )
     parser.add_argument(
+        "--min-stage2-days",
+        type=int,
+        default=None,
+        metavar="DAYS",
+        help="Only enter trades where stage2_days >= this (e.g. 1 = must be in Stage 2).",
+    )
+    parser.add_argument(
+        "--max-stage2-days",
+        type=int,
+        default=None,
+        metavar="DAYS",
+        help="Only enter trades where stage2_days <= this (e.g. 20 = Early Stage 2 only).",
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=None,
@@ -135,13 +149,13 @@ def _print_summary(metrics: dict, params: dict) -> None:
         metrics: Dict produced by performance_metrics.compute().
         params: Dict of backtest run parameters.
     """
-    sep = "─" * 60
+    sep = "-" * 60
 
     print(f"\n{sep}")
-    print("  NSE VCP Scanner — Backtest Summary")
+    print("  NSE VCP Scanner - Backtest Summary")
     print(sep)
     print(f"  Signal      : {params['entry_signal']}")
-    print(f"  Period      : {params['start_date']} → {params['end_date']}")
+    print(f"  Period      : {params['start_date']} to {params['end_date']}")
     print(f"  Stop / Target / Hold  : "
           f"{float(params['stop_loss_pct'])*100:.0f}% / "
           f"{float(params['target_pct'])*100:.0f}% / "
@@ -156,7 +170,7 @@ def _print_summary(metrics: dict, params: dict) -> None:
 
     wr  = metrics["win_rate"]
     pf  = metrics["profit_factor"]
-    pf_str = f"{pf:.2f}" if pf != float("inf") else "∞"
+    pf_str = f"{pf:.2f}" if pf != float("inf") else "inf"
 
     print(f"  Total trades    : {metrics['total_trades']}")
     print(f"  Win rate        : {wr:.1f}%")
@@ -170,7 +184,7 @@ def _print_summary(metrics: dict, params: dict) -> None:
     print(f"  Best / Worst    : {metrics['best_trade_pct']:+.1f}% / {metrics['worst_trade_pct']:+.1f}%")
     print(f"  Avg holding     : {metrics['avg_holding_days']:.0f} days")
     print(sep)
-    print(f"  Exits → Stop: {metrics['stop_count']}  "
+    print(f"  Exits - Stop: {metrics['stop_count']}  "
           f"Target: {metrics['target_count']}  "
           f"Timeout: {metrics['timeout_count']}")
 
@@ -226,6 +240,8 @@ def main() -> int:
         target_pct          = args.target / 100.0,
         max_holding_days    = args.hold,
         min_composite_score = args.min_score,
+        min_stage2_days     = args.min_stage2_days,
+        max_stage2_days     = args.max_stage2_days,
     )
 
     _print_summary(result.metrics, result.params)
@@ -235,7 +251,7 @@ def main() -> int:
         try:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             result.trades.to_csv(args.out, index=False)
-            print(f"\n  Trade log saved → {args.out.resolve()}")
+            print(f"\n  Trade log saved: {args.out.resolve()}")
         except Exception as exc:
             logger.error("CSV export failed: %s", exc, exc_info=True)
             print(f"WARNING: Could not save CSV: {exc}")

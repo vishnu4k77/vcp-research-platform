@@ -1,4 +1,5 @@
 import sys
+from typing import Optional
 
 import pandas as pd
 from sqlalchemy import text
@@ -41,6 +42,9 @@ class FeaturePipeline:
     FEATURE_COLUMNS = [
         "symbol",
         "trade_date",
+        "open_price",
+        "high_price",
+        "low_price",
         "close_price",
         "volume",
         "ema_10",
@@ -60,6 +64,8 @@ class FeaturePipeline:
         # price context — used by BreakoutSignal (DRY: computed once here, not per signal)
         "high_52w",
         "low_52w",
+        # earnings day flag — populated from stock_earnings_dates by EarningsService
+        "is_earnings_day",
     ]
 
     @staticmethod
@@ -143,27 +149,47 @@ class FeaturePipeline:
         return df
 
     @staticmethod
-    def process_symbol(symbol_df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Runs all feature calculators for a single symbol's price history.
-        Order matters: StageFeature reads EMA columns produced by EMAFeature.
-        """
+    def process_symbol(
+        symbol_df: pd.DataFrame,
+        earnings_dates: Optional[set] = None,
+    ) -> pd.DataFrame:
+        """Run all feature calculators for a single symbol's price history.
 
+        Execution order matters: later calculators depend on earlier columns.
+          1. EMAFeature        → ema_10/21/50/150/200, trend_score
+          2. StageFeature      → weinstein_stage  (consumes EMA columns)
+          3. VolumeFeature     → avg_volume_10/20, relative_volume
+          4. VolatilityFeature → atr_14, daily_range_pct, volatility_contraction
+          5. is_earnings_day   → BIT flag from earnings_dates set (no indicator math)
+
+        Args:
+            symbol_df:      OHLCV + metadata DataFrame for one symbol, sorted ascending.
+            earnings_dates: Set of datetime.date values for this symbol's earnings dates,
+                            loaded from stock_earnings_dates by EarningsService.
+                            Pass None (or omit) to mark all rows as non-earnings days.
+
+        Returns:
+            symbol_df with all feature columns appended.
+            Empty DataFrame on unrecoverable error.
+        """
         if symbol_df.empty:
             return pd.DataFrame()
 
         try:
-            # 1. EMAs + trend_score
             symbol_df = EMAFeature.calculate(symbol_df)
-
-            # 2. Weinstein stage classification (depends on ema_50/150/200)
             symbol_df = StageFeature.calculate(symbol_df)
-
-            # 3. Volume averages + relative volume
             symbol_df = VolumeFeature.calculate(symbol_df)
-
-            # 4. ATR, daily range %, rolling volatility + contraction ratio
             symbol_df = VolatilityFeature.calculate(symbol_df)
+
+            # Mark earnings days — vectorised set-membership check, no per-row DB call
+            if earnings_dates:
+                symbol_df["is_earnings_day"] = (
+                    pd.to_datetime(symbol_df["trade_date"]).dt.date
+                    .isin(earnings_dates)
+                    .astype(int)
+                )
+            else:
+                symbol_df["is_earnings_day"] = 0
 
             return symbol_df
 
@@ -234,7 +260,13 @@ class FeaturePipeline:
 
     @staticmethod
     def run() -> None:
+        """Execute the full feature pipeline.
 
+        Loads earnings dates once from DB before the per-symbol loop so each
+        call to process_symbol() can mark earnings days without any DB round-trip.
+        Falls back gracefully if stock_earnings_dates is empty or unavailable —
+        is_earnings_day will be 0 for all rows, which is the safe conservative default.
+        """
         logger.info("Feature pipeline started")
 
         raw_df = FeaturePipeline.load_price_data()
@@ -248,6 +280,11 @@ class FeaturePipeline:
         if validated_df.empty:
             logger.warning("No valid price data after validation — aborting")
             return
+
+        # Load earnings map once — shared across all per-symbol calls.
+        # Import here (not at module top) to avoid circular dependency risk.
+        from app.data.earnings_service import EarningsService
+        earnings_map = EarningsService.load_earnings_map()
 
         # Truncate before repopulating (preserves user's schema + constraints)
         FeaturePipeline._clear_features_table()
@@ -267,7 +304,8 @@ class FeaturePipeline:
             total=n_symbols,
         ):
             symbol_df = symbol_df.copy()
-            feature_df = FeaturePipeline.process_symbol(symbol_df)
+            symbol_earnings = earnings_map.get(symbol, set())
+            feature_df = FeaturePipeline.process_symbol(symbol_df, symbol_earnings)
 
             if feature_df.empty:
                 logger.debug("No features generated for %s", symbol)

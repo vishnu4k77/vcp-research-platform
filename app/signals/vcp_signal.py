@@ -8,18 +8,23 @@ logger = get_logger(__name__)
 
 
 class VCPSignal:
-    """
-    Volatility Contraction Pattern — Minervini SEPA methodology.
+    """Volatility Contraction Pattern — Minervini SEPA methodology.
 
     Detects stocks in Stage 2 uptrend whose ATR, daily range, and volume
-    are all contracting simultaneously, indicating an institutional
-    accumulation base before a high-probability breakout.
+    are all contracting simultaneously, indicating institutional
+    accumulation before a high-probability breakout.
 
     Produces four columns:
-      ema_alignment_signal        — tight EMA stack (close > 10 > 21 > 50)
-      volume_contraction_signal   — relative volume below dry-up threshold
+      ema_alignment_signal          — tight EMA stack (close > 10 > 21 > 50)
+      volume_contraction_signal     — relative volume below dry-up threshold
       volatility_contraction_signal — rolling vol below its own average
-      vcp_signal                  — all VCP conditions met simultaneously
+      vcp_signal                    — all VCP conditions met simultaneously
+
+    Pre-earnings suppression: vcp_signal is zeroed when the NEXT trading day
+    is an earnings release (is_earnings_day.shift(-1) == 1). Earnings-day
+    volume is event-driven, not accumulation — entering the day before
+    earnings on a VCP setup exposes the trade to gap risk.
+    is_earnings_day is optional; absent column = no suppression applied.
     """
 
     REQUIRED_COLUMNS = [
@@ -107,6 +112,22 @@ class VCPSignal:
             else pd.Series(False, index=df.index)
         )
 
+        # ── Pre-earnings suppression ──────────────────────────────────────
+        # Suppress VCP when TOMORROW is an earnings release day.
+        # shift(-1) looks one row ahead; fill_value=0 means the last row
+        # (no known next day) is treated as not-earnings-eve.
+        # is_earnings_day is optional — absent column = no suppression.
+        if "is_earnings_day" in df.columns:
+            next_day_earnings = (
+                pd.to_numeric(df["is_earnings_day"], errors="coerce")
+                .fillna(0)
+                .shift(-1, fill_value=0)
+                == 1
+            )
+            not_pre_earnings = ~next_day_earnings
+        else:
+            not_pre_earnings = pd.Series(True, index=df.index)
+
         # ── Composite VCP ─────────────────────────────────────────────────
         df["vcp_signal"] = np.where(
             (
@@ -115,6 +136,7 @@ class VCPSignal:
                 & (df["volume_contraction_signal"] == 1)
                 & (df["volatility_contraction_signal"] == 1)
                 & atr_contracting
+                & not_pre_earnings
             ),
             1,
             0,

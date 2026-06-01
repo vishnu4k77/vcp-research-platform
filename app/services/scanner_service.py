@@ -13,7 +13,7 @@ from typing import Optional
 import pandas as pd
 from sqlalchemy import text
 
-from app.config.db import engine
+from app.config.db import nolock_connect
 from app.config.logging_config import get_logger
 from app.config.strategy_config import DashboardConfig, StrategyConfig
 
@@ -44,7 +44,7 @@ class ScannerService:
             ORDER BY trade_date DESC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 row = conn.execute(query).fetchone()
             if row is None:
                 return {}
@@ -76,7 +76,7 @@ class ScannerService:
             ORDER BY trade_date DESC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 row = conn.execute(query).fetchone()
             if row is None:
                 return {}
@@ -112,7 +112,7 @@ class ScannerService:
             ORDER BY start_time DESC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 df = pd.read_sql(query, conn, params={"limit": limit})
             return df
         except Exception as exc:
@@ -136,7 +136,7 @@ class ScannerService:
             FROM stock_signals
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 row = conn.execute(query).fetchone()
             if row and row[0] and row[1]:
                 return row[0], row[1]
@@ -165,7 +165,7 @@ class ScannerService:
             ORDER BY trade_date DESC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 row = conn.execute(query, {"target": target}).fetchone()
             return row[0] if row else None
         except Exception as exc:
@@ -189,7 +189,7 @@ class ScannerService:
             ORDER BY trade_date DESC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 rows = conn.execute(query).fetchall()
             return [r[0] for r in rows if r[0] is not None]
         except Exception as exc:
@@ -217,7 +217,7 @@ class ScannerService:
             ORDER BY trade_date DESC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 rows = conn.execute(query, {"limit": limit}).fetchall()
             return [r[0] for r in rows if r[0] is not None]
         except Exception as exc:
@@ -248,7 +248,7 @@ class ScannerService:
             ORDER BY nir.index_code
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 rows = conn.execute(query).fetchall()
             return [{"index_code": r[0], "index_name": r[1]} for r in rows]
         except Exception as exc:
@@ -335,7 +335,7 @@ class ScannerService:
             params["index_code"] = index_code
 
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 df = pd.read_sql(query, conn, params=params)
             logger.debug(
                 "scanner_data: %d rows | date=%s | index=%s | min_score=%.0f",
@@ -365,7 +365,7 @@ class ScannerService:
             ORDER BY trade_date DESC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 row = conn.execute(query).fetchone()
             return row[0] if row else None
         except Exception as exc:
@@ -429,7 +429,7 @@ class ScannerService:
             params["index_code"] = index_code
 
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 df = pd.read_sql(query, conn, params=params)
             return df
         except Exception as exc:
@@ -460,7 +460,7 @@ class ScannerService:
             ORDER BY trade_date DESC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 df = pd.read_sql(query, conn, params={"limit": limit})
             return df.iloc[::-1].reset_index(drop=True)   # flip to ascending
         except Exception as exc:
@@ -503,7 +503,7 @@ class ScannerService:
             ORDER BY sf.trade_date DESC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 df = pd.read_sql(
                     query, conn,
                     params={"symbol": symbol, "lookback": lookback_days},
@@ -577,7 +577,7 @@ class ScannerService:
             params["index_code"] = index_code
 
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 df = pd.read_sql(query, conn, params=params)
             logger.debug(
                 "get_sector_stocks: %d rows | sector=%s | index=%s | date=%s",
@@ -617,7 +617,7 @@ class ScannerService:
             ORDER BY trade_date DESC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 row = conn.execute(query, {"symbol": bare_symbol}).fetchone()
             if row is None:
                 return {}
@@ -655,7 +655,7 @@ class ScannerService:
             ORDER BY company_name ASC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 df = pd.read_sql(query, conn, params={
                     "trade_date": trade_date,
                     "nse_suffix": StrategyConfig.YAHOO_NSE_SUFFIX,
@@ -682,7 +682,7 @@ class ScannerService:
             ORDER BY symbol ASC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 rows = conn.execute(query).fetchall()
             return [r[0] for r in rows]
         except Exception as exc:
@@ -717,7 +717,7 @@ class ScannerService:
             ORDER BY sort_order ASC, preset_name ASC, signal_name ASC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 rows = conn.execute(query).fetchall()
 
             if not rows:
@@ -752,7 +752,7 @@ class ScannerService:
             "WHERE is_default = 1 AND is_active = 1"
         )
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 row = conn.execute(query).fetchone()
             if row:
                 return str(row[0])
@@ -817,7 +817,7 @@ class ScannerService:
             ORDER BY company_name ASC
         """)
         try:
-            with engine.connect() as conn:
+            with nolock_connect() as conn:
                 df = pd.read_sql(
                     query, conn, params={"nse_suffix": StrategyConfig.YAHOO_NSE_SUFFIX}
                 )

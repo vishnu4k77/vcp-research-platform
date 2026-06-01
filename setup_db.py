@@ -175,6 +175,20 @@ TABLE_DDL = {
         )
     """,
 
+    # Earnings dates — one row per (symbol, earnings_date).
+    # Populated by EarningsService; consumed by FeaturePipeline to set is_earnings_day.
+    # Symbol stored in Yahoo Finance format (e.g. NYKAA.NS) to match pipeline tables.
+    "stock_earnings_dates": """
+        CREATE TABLE stock_earnings_dates (
+            id            INT          IDENTITY(1,1) NOT NULL,
+            symbol        VARCHAR(30)  NOT NULL,
+            earnings_date DATE         NOT NULL,
+            fetched_at    DATETIME     NOT NULL CONSTRAINT df_sed_fetched DEFAULT GETDATE(),
+            CONSTRAINT pk_stock_earnings_dates PRIMARY KEY (id),
+            CONSTRAINT uq_sed_symbol_date      UNIQUE (symbol, earnings_date)
+        )
+    """,
+
     # Sector rotation scores — one row per (trade_date, sector).
     # Computed by SectorMomentum after each SignalPipeline run.
     # momentum_score is the weighted composite; momentum_rank is cross-sector rank (1=best).
@@ -234,6 +248,12 @@ TABLE_DDL = {
 # Only ADD operations — never drops existing data.
 
 COLUMN_MIGRATIONS = [
+    # stock_features — raw OHLC columns (required by BreakoutSignal candle guards)
+    ("stock_features", "open_price",                   "FLOAT NULL"),
+    ("stock_features", "high_price",                   "FLOAT NULL"),
+    ("stock_features", "low_price",                    "FLOAT NULL"),
+    # stock_features — earnings day flag (populated by EarningsService from Yahoo Finance)
+    ("stock_features", "is_earnings_day",              "BIT   NULL"),
     # stock_features — indicator columns
     ("stock_features", "weinstein_stage",              "INT   NULL"),
     # stock_features — 52-week price context (computed by VolatilityFeature)
@@ -252,6 +272,11 @@ COLUMN_MIGRATIONS = [
     # stock_signals — Stage 2 age: how long the current consecutive Stage 2 run has been active
     ("stock_signals", "stage2_days",          "INT  NULL"),   # trading days in current S2 streak
     ("stock_signals", "stage2_started_date",  "DATE NULL"),   # first date of current S2 streak
+    # stock_signals — Phase 2A: RS value, RS new high, Minervini, Darvas
+    ("stock_signals", "rs_value",         "FLOAT NULL"),  # excess return vs Nifty 50 (%)
+    ("stock_signals", "rs_new_high",      "BIT   NULL"),  # RS value at 52-week rolling max
+    ("stock_signals", "minervini_signal", "BIT   NULL"),  # all 8 Trend Template conditions
+    ("stock_signals", "darvas_signal",    "BIT   NULL"),  # Darvas box breakout near 52w high
 ]
 
 
@@ -274,6 +299,7 @@ REQUIRED_TABLES = [
     "stock_fundamentals",         # Screener.in fundamentals — scraped monthly
     "fundamental_filter_config",  # fundamental threshold config — editable in SQL
     "scanner_preset_config",      # scanner preset weights — editable in SQL without code changes
+    "stock_earnings_dates",       # Yahoo Finance earnings dates — used for is_earnings_day flag
     "sector_momentum",            # sector rotation scores — computed after each signal run
 ]
 
@@ -396,33 +422,36 @@ def _seed_fundamental_filters() -> None:
 
 
 def _seed_scanner_presets() -> None:
-    """Insert scanner preset weights from DashboardConfig if the table is empty.
+    """Upsert scanner preset weights from DashboardConfig into scanner_preset_config.
 
-    Flattens DashboardConfig.SCANNER_PRESETS into one row per (preset, signal).
-    The first preset in the dict gets is_default=1.
-    sort_order is assigned by preset position so the dropdown order matches code.
+    Uses INSERT WHERE NOT EXISTS per (preset_name, signal_name) row so this
+    function is safe to re-run after adding new presets to DashboardConfig —
+    existing rows are left untouched, only missing rows are inserted.
 
-    To add a new preset without code changes:
+    Previous behaviour (skip-if-any-rows-exist) was replaced because it
+    prevented new presets added to DashboardConfig from ever reaching the DB.
+
+    To add a new preset via SQL without touching Python code:
         INSERT INTO scanner_preset_config (preset_name, signal_name, weight, sort_order)
-        VALUES ('My Preset', 'trend_signal', 30, 6), ...
+        VALUES ('My Preset', 'trend_signal', 30, 10), ...
     """
+    inserted = 0
     try:
+        preset_names = list(DashboardConfig.SCANNER_PRESETS.keys())
         with engine.begin() as conn:
-            count = conn.execute(text("SELECT COUNT(*) FROM scanner_preset_config")).scalar()
-            if count > 0:
-                logger.info("scanner_preset_config already seeded (%d rows) — skipping", count)
-                return
-
-            preset_names = list(DashboardConfig.SCANNER_PRESETS.keys())
             for sort_idx, preset_name in enumerate(preset_names, start=1):
-                weights = DashboardConfig.SCANNER_PRESETS[preset_name]
+                weights    = DashboardConfig.SCANNER_PRESETS[preset_name]
                 is_default = 1 if sort_idx == 1 else 0
                 for signal_name, weight in weights.items():
-                    conn.execute(
+                    result = conn.execute(
                         text(
                             "INSERT INTO scanner_preset_config "
-                            "(preset_name, signal_name, weight, is_active, is_default, sort_order) "
-                            "VALUES (:preset, :signal, :weight, 1, :is_default, :sort)"
+                            "    (preset_name, signal_name, weight, is_active, is_default, sort_order) "
+                            "SELECT :preset, :signal, :weight, 1, :is_default, :sort "
+                            "WHERE NOT EXISTS ( "
+                            "    SELECT 1 FROM scanner_preset_config "
+                            "    WHERE preset_name = :preset AND signal_name = :signal "
+                            ")"
                         ),
                         {
                             "preset":     preset_name,
@@ -432,11 +461,12 @@ def _seed_scanner_presets() -> None:
                             "sort":       sort_idx,
                         },
                     )
+                    inserted += result.rowcount
 
         total = sum(len(v) for v in DashboardConfig.SCANNER_PRESETS.values())
         logger.info(
-            "scanner_preset_config seeded | presets=%d | rows=%d",
-            len(DashboardConfig.SCANNER_PRESETS), total,
+            "scanner_preset_config sync | presets=%d | total_rows=%d | inserted=%d",
+            len(DashboardConfig.SCANNER_PRESETS), total, inserted,
         )
 
     except Exception as exc:

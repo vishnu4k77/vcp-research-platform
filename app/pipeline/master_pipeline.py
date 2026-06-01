@@ -1,9 +1,11 @@
 import sys
+from typing import Optional
 
 from app.config.logging_config import get_logger
 from app.monitoring.pipeline_monitor import PipelineMonitor
 from app.pipeline.pipeline_context import PipelineContext
 from app.main import DataIngestionPipeline
+from app.data.earnings_service import EarningsService
 from app.features.feature_pipeline import FeaturePipeline
 from app.regime.regime_pipeline import RegimePipeline
 from app.signals.signal_pipeline import SignalPipeline
@@ -77,13 +79,33 @@ class MasterPipeline:
             ):
                 return MasterPipeline._finalize(context)
 
-        # ── Step 2: Feature engineering ───────────────────────────────────
+        # ── Step 2: Earnings dates refresh (non-blocking) ────────────────
+        # Refreshes stock_earnings_dates for all active symbols so FeaturePipeline
+        # can mark is_earnings_day correctly.  Stale-check (STALE_AFTER_DAYS)
+        # means Yahoo is only called when data is > 7 days old — not every run.
+        # Non-blocking: a fetch failure means is_earnings_day defaults to 0
+        # (safe conservative fallback; the gap-and-fail guard still provides protection).
+        logger.info("── Step [earnings_refresh] starting")
+        try:
+            from app.config.ticker_loader import load_tickers
+            symbols = load_tickers()
+            EarningsService.refresh_all(symbols)
+            context.mark_step_completed("earnings_refresh")
+            logger.info("── Step [earnings_refresh] completed")
+        except Exception as exc:
+            logger.warning(
+                "── Step [earnings_refresh] failed (non-blocking): %s", exc
+            )
+            context.add_warning(f"Earnings refresh failed: {exc}")
+            context.mark_step_completed("earnings_refresh")  # non-blocking
+
+        # ── Step 3: Feature engineering ───────────────────────────────────
         if not MasterPipeline._run_step(
             context, "features", FeaturePipeline.run
         ):
             return MasterPipeline._finalize(context)
 
-        # ── Step 3: Market regime detection ───────────────────────────────
+        # ── Step 4: Market regime detection ───────────────────────────────
         # Non-blocking: regime failure is a warning, not a hard stop.
         # Signals still run; regime metadata is simply absent for this run.
         logger.info("── Step [regime] starting")
@@ -109,7 +131,7 @@ class MasterPipeline:
             context.add_warning(f"Regime step failed: {exc}")
             context.mark_step_completed("regime")   # non-blocking
 
-        # ── Step 4: Signal generation ─────────────────────────────────────
+        # ── Step 5: Signal generation ─────────────────────────────────────
         # Pass regime market_status so SignalPipeline can apply the regime gate
         # (suppress breakout/VCP signals in BEAR; suppress all in cash_mode).
         cached_regime = context.get_cache_object("regime")
@@ -122,7 +144,7 @@ class MasterPipeline:
         ):
             return MasterPipeline._finalize(context)
 
-        # ── Step 5: Sector momentum (non-blocking) ────────────────────────
+        # ── Step 6: Sector momentum (non-blocking) ────────────────────────
         # Consumes stock_signals produced in Step 4 — must run after signals.
         # A scoring failure never aborts the overall pipeline.
         logger.info("── Step [sector_momentum] starting")

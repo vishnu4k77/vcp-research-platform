@@ -440,7 +440,17 @@ def render_backtest_tab() -> None:
             )
         regime_df = pd.DataFrame(m["by_regime"]).T.reset_index()
         regime_df.columns = ["Regime", "Trades", "Win Rate %", "Avg Return %"]
-        st.dataframe(regime_df, use_container_width=True, hide_index=True)
+        # Explicit "large" widths so total (~1600px) exceeds the container,
+        # forcing the dataframe to render its horizontal scrollbar.
+        _regime_col_config = {
+            col: st.column_config.Column(width="large") for col in regime_df.columns
+        }
+        st.dataframe(
+            regime_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config=_regime_col_config,
+        )
 
     # ── Trade table ───────────────────────────────────────────────────────────
     st.divider()
@@ -453,7 +463,19 @@ def render_backtest_tab() -> None:
         c.replace("_", " ").title() for c in display.columns
     ]
 
-    st.dataframe(display, use_container_width=True, hide_index=True, height=400)
+    # Explicit column widths so total (~2000px) exceeds the container width,
+    # which forces the dataframe to render its internal horizontal scrollbar.
+    _trade_col_config = {
+        col: st.column_config.Column(width="medium") for col in display.columns
+    }
+
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        height=400,
+        column_config=_trade_col_config,
+    )
 
     csv = tr.to_csv(index=False).encode("utf-8")
     st.download_button(

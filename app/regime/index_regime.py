@@ -111,22 +111,24 @@ class IndexRegime:
             return pd.DataFrame()
 
     @staticmethod
-    def _classify(df: pd.DataFrame) -> Optional[RegimeResult]:
-        """
-        Computes regime from the latest bar in df.
-        Returns None if not enough history (need >= 220 bars for EMA 200 warmup).
-        """
+    def _enrich(df: pd.DataFrame) -> pd.DataFrame:
+        """Compute EMA50, EMA200, slope, and higher-highs for every row in df.
 
-        if len(df) < 220:
-            logger.warning(
-                "Insufficient Nifty history for regime: %d bars (need >= 220)", len(df)
-            )
-            return None
+        This is the shared computation used by both single-day detection
+        and the full historical backfill.  Requires at least 220 rows for
+        EMA 200 to be meaningful; caller is responsible for that check.
 
+        Args:
+            df: DataFrame with columns [trade_date, close], sorted ascending.
+
+        Returns:
+            df copy with ema_50, ema_200, ema_200_slope_pct, peak_20,
+            higher_highs columns appended.
+        """
         slope_period = StrategyConfig.EMA_SLOPE_PERIOD
 
         df = df.copy()
-        df["ema_50"] = df["close"].ewm(span=50, adjust=False).mean()
+        df["ema_50"]  = df["close"].ewm(span=50,  adjust=False).mean()
         df["ema_200"] = df["close"].ewm(span=200, adjust=False).mean()
 
         prior_ema200 = df["ema_200"].shift(slope_period)
@@ -136,15 +138,25 @@ class IndexRegime:
             * 100
         ).fillna(0.0)
 
-        df["peak_20"] = df["close"].rolling(20).max()
+        df["peak_20"]     = df["close"].rolling(20).max()
         df["higher_highs"] = df["peak_20"] > df["peak_20"].shift(20)
 
-        row = df.iloc[-1]
+        return df
 
-        nifty_close = float(row["close"])
-        ema_50 = float(row["ema_50"])
-        ema_200 = float(row["ema_200"])
-        ema_slope = float(row["ema_200_slope_pct"])
+    @staticmethod
+    def _row_to_result(row: pd.Series) -> RegimeResult:
+        """Convert a single enriched Nifty row into a RegimeResult.
+
+        Args:
+            row: One row from a DataFrame produced by _enrich().
+
+        Returns:
+            RegimeResult with regime_score and market_status populated.
+        """
+        nifty_close  = float(row["close"])
+        ema_50       = float(row["ema_50"])
+        ema_200      = float(row["ema_200"])
+        ema_slope    = float(row["ema_200_slope_pct"])
         higher_highs = bool(row["higher_highs"])
 
         score = 0
@@ -173,6 +185,59 @@ class IndexRegime:
             ema_200_slope_pct=ema_slope,
             higher_highs=higher_highs,
         )
+
+    @staticmethod
+    def _classify(df: pd.DataFrame) -> Optional[RegimeResult]:
+        """Classify regime for the latest bar in df (single-day detection).
+
+        Args:
+            df: DataFrame with columns [trade_date, close], sorted ascending.
+
+        Returns:
+            RegimeResult for the most recent row, or None if < 220 bars.
+        """
+        if len(df) < 220:
+            logger.warning(
+                "Insufficient Nifty history for regime: %d bars (need >= 220)", len(df)
+            )
+            return None
+
+        enriched = IndexRegime._enrich(df)
+        return IndexRegime._row_to_result(enriched.iloc[-1])
+
+    @staticmethod
+    def classify_history(df: pd.DataFrame) -> list[RegimeResult]:
+        """Classify regime for ALL rows in df — used for historical backfill.
+
+        Requires >= 220 bars total; rows before EMA 200 has warmed up are
+        skipped (their ema_200 values are unreliable).  Returns one
+        RegimeResult per valid trading day, sorted ascending by trade_date.
+
+        Args:
+            df: DataFrame with columns [trade_date, close], sorted ascending.
+                Should cover at least 1 year plus a warmup buffer.
+
+        Returns:
+            List of RegimeResult, one per row from bar 220 onwards.
+            Empty list if df has fewer than 220 rows.
+        """
+        if len(df) < 220:
+            logger.warning(
+                "Insufficient Nifty history for backfill: %d bars (need >= 220)", len(df)
+            )
+            return []
+
+        enriched = IndexRegime._enrich(df)
+
+        results: list[RegimeResult] = []
+        for _, row in enriched.iloc[220:].iterrows():
+            try:
+                results.append(IndexRegime._row_to_result(row))
+            except Exception as exc:
+                logger.debug("Skipping row %s: %s", row.get("trade_date"), exc)
+
+        logger.info("classify_history complete | %d regime rows computed", len(results))
+        return results
 
     @staticmethod
     def detect() -> Optional[RegimeResult]:
