@@ -81,6 +81,10 @@ class TargetCalculator:
         t1_price = safe_pivot + base_range * TargetConfig.T1_MULTIPLIER
         t2_price = safe_pivot + base_range * TargetConfig.T2_MULTIPLIER
 
+        # Actual target prices in ₹ — for setting limit orders directly
+        df["target_1_price"] = np.where(safe_pivot.notna(), t1_price.round(2), np.nan)
+        df["target_2_price"] = np.where(safe_pivot.notna(), t2_price.round(2), np.nan)
+
         # % upside from TODAY's close so the user sees total remaining potential.
         # Positive = still upside remaining; negative = already exceeded the target.
         df["target_1_pct"] = ((t1_price / safe_close - 1) * 100).round(2)

@@ -109,7 +109,9 @@ class SignalPipeline:
         # base_low_price is NOT here — it is an intermediate used only by TargetCalculator
         "pivot_price",      # resistance level in ₹ (shift-1 rolling max, no lookahead)
         "base_range_pct",   # (pivot - base_low) / pivot × 100  — base tightness
+        "target_1_price",   # T1 in ₹ — for setting actual limit orders
         "target_1_pct",     # % upside from close to T1 (pivot + base_range × 0.5)
+        "target_2_price",   # T2 in ₹ — full measured move price
         "target_2_pct",     # % upside from close to T2 (pivot + base_range × 1.0)
         "risk_reward_t2",   # T2_pct / STOP_LOSS_PCT  (e.g. 15 / 7 = 2.14)
         "upside_prob_pct",  # formula-based probability; updates daily (see TargetConfig)

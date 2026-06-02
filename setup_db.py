@@ -297,7 +297,9 @@ COLUMN_MIGRATIONS = [
     # After adding these 6 columns total OUTPUT_COLUMNS = 30; SQL_BATCH_SIZE reduced to 65.
     ("stock_signals", "pivot_price",     "FLOAT NULL"),   # 20-day resistance level in ₹
     ("stock_signals", "base_range_pct",  "FLOAT NULL"),   # base width % of pivot
+    ("stock_signals", "target_1_price",  "FLOAT NULL"),   # T1 in ₹ — actual limit order price
     ("stock_signals", "target_1_pct",    "FLOAT NULL"),   # % upside to T1 from close
+    ("stock_signals", "target_2_price",  "FLOAT NULL"),   # T2 in ₹ — full measured move price
     ("stock_signals", "target_2_pct",    "FLOAT NULL"),   # % upside to T2 from close
     ("stock_signals", "risk_reward_t2",  "FLOAT NULL"),   # T2_pct / 7% stop
     ("stock_signals", "upside_prob_pct", "FLOAT NULL"),   # formula-based probability (updates daily)
