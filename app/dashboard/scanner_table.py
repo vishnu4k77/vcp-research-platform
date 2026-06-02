@@ -267,6 +267,12 @@ _DISPLAY_NAMES: dict[str, str] = {
     "rs_signal":                   "RS",
     "distance_from_pivot_pct":     "Dist Pivot%",
     "distance_from_52w_high_pct":  "Dist 52w%",
+    "pivot_price":                 "Pivot ₹",
+    "base_range_pct":              "Base %",
+    "target_1_pct":                "T1 %",
+    "target_2_pct":                "T2 %",
+    "risk_reward_t2":              "R:R",
+    "upside_prob_pct":             "Est Prob%",
     "fund_quality_score":          "Fund Score",
     "fund_promoter_pct":           "Promoter%",
     "fund_roe":                    "ROE%",
@@ -333,6 +339,47 @@ def _style_stage2_age(val) -> str:
         if v <= StrategyConfig.STAGE2_MID_MAX_DAYS:
             return f"color: {ORANGE}; font-weight: 600"
         return f"color: {RED}; font-weight: 600"
+    except (TypeError, ValueError):
+        return f"color: {TEXT_MUTED}"
+
+
+def _style_target_pct(val) -> str:
+    """Color T1/T2 % upside: green ≥ 10%, orange ≥ 5%, red if negative."""
+    try:
+        v = float(val)
+        if v >= 10.0:
+            return f"color: {GREEN}; font-weight: 600"
+        if v >= 5.0:
+            return f"color: {ORANGE}; font-weight: 600"
+        if v < 0:
+            return f"color: {RED}"
+        return f"color: {TEXT_MUTED}"
+    except (TypeError, ValueError):
+        return f"color: {TEXT_MUTED}"
+
+
+def _style_risk_reward(val) -> str:
+    """Color R:R ratio: green ≥ 2.0, orange ≥ 1.5, red < 1.5."""
+    try:
+        v = float(val)
+        if v >= 2.0:
+            return f"color: {GREEN}; font-weight: 700"
+        if v >= 1.5:
+            return f"color: {ORANGE}; font-weight: 600"
+        return f"color: {RED}"
+    except (TypeError, ValueError):
+        return f"color: {TEXT_MUTED}"
+
+
+def _style_prob(val) -> str:
+    """Color estimated probability: green ≥ 55%, orange ≥ 45%, red < 45%."""
+    try:
+        v = float(val)
+        if v >= 55.0:
+            return f"color: {GREEN}; font-weight: 700"
+        if v >= 45.0:
+            return f"color: {ORANGE}; font-weight: 600"
+        return f"color: {RED}"
     except (TypeError, ValueError):
         return f"color: {TEXT_MUTED}"
 
@@ -595,6 +642,12 @@ def render_scanner_table() -> None:
         score_col:                                       "{:.1f}",
         _DISPLAY_NAMES.get("distance_from_pivot_pct",  "Dist Pivot%"): "{:.1f}%",
         _DISPLAY_NAMES.get("distance_from_52w_high_pct","Dist 52w%"):  "{:.1f}%",
+        _DISPLAY_NAMES.get("pivot_price",  "Pivot ₹"):  "{:.1f}",
+        _DISPLAY_NAMES.get("base_range_pct","Base %"):  "{:.1f}%",
+        _DISPLAY_NAMES.get("target_1_pct", "T1 %"):     "{:.1f}%",
+        _DISPLAY_NAMES.get("target_2_pct", "T2 %"):     "{:.1f}%",
+        _DISPLAY_NAMES.get("risk_reward_t2","R:R"):      "{:.2f}",
+        _DISPLAY_NAMES.get("upside_prob_pct","Est Prob%"): "{:.1f}%",
     }
     if "fund_promoter_pct" in df.columns:
         fmt[_DISPLAY_NAMES["fund_promoter_pct"]] = "{:.1f}%"
@@ -603,7 +656,11 @@ def render_scanner_table() -> None:
     if "fund_roce" in df.columns:
         fmt[_DISPLAY_NAMES["fund_roce"]] = "{:.1f}%"
 
-    s2age_col = _DISPLAY_NAMES.get("stage2_days", "S2 Age(d)")
+    s2age_col    = _DISPLAY_NAMES.get("stage2_days",    "S2 Age(d)")
+    t1_col       = _DISPLAY_NAMES.get("target_1_pct",   "T1 %")
+    t2_col       = _DISPLAY_NAMES.get("target_2_pct",   "T2 %")
+    rr_col       = _DISPLAY_NAMES.get("risk_reward_t2", "R:R")
+    prob_col     = _DISPLAY_NAMES.get("upside_prob_pct","Est Prob%")
 
     styled = display.style.map(_style_signals, subset=sig_display_names)
     if score_col in display.columns:
@@ -612,6 +669,14 @@ def render_scanner_table() -> None:
         styled = styled.map(_style_stage2_age, subset=[s2age_col])
     if fscore_col in display.columns:
         styled = styled.map(_style_fund_score, subset=[fscore_col])
+    if t1_col in display.columns:
+        styled = styled.map(_style_target_pct, subset=[t1_col])
+    if t2_col in display.columns:
+        styled = styled.map(_style_target_pct, subset=[t2_col])
+    if rr_col in display.columns:
+        styled = styled.map(_style_risk_reward, subset=[rr_col])
+    if prob_col in display.columns:
+        styled = styled.map(_style_prob, subset=[prob_col])
     styled = styled.format(fmt, na_rep="—")
 
     # Only set explicit widths for non-boolean columns.
@@ -625,6 +690,12 @@ def render_scanner_table() -> None:
         "S2 Age(d)":   st.column_config.NumberColumn(format="%d", width=78),
         "Dist Pivot%": st.column_config.NumberColumn(format="%.1f%%", width=95),
         "Dist 52w%":   st.column_config.NumberColumn(format="%.1f%%", width=90),
+        "Pivot ₹":     st.column_config.NumberColumn(format="%.1f",   width=82),
+        "Base %":      st.column_config.NumberColumn(format="%.1f%%", width=72),
+        "T1 %":        st.column_config.NumberColumn(format="%.1f%%", width=65),
+        "T2 %":        st.column_config.NumberColumn(format="%.1f%%", width=65),
+        "R:R":         st.column_config.NumberColumn(format="%.2f",   width=60),
+        "Est Prob%":   st.column_config.NumberColumn(format="%.1f%%", width=85),
         "Fund Score":  st.column_config.NumberColumn(format="%.1f", width=85),
         "Promoter%":   st.column_config.NumberColumn(format="%.1f%%", width=88),
         "ROE%":        st.column_config.NumberColumn(format="%.1f%%", width=65),

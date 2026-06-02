@@ -164,6 +164,11 @@ class BreakoutSignal:
         base_range_pct = (safe_resistance - safe_base_low) / safe_resistance
         tight_base = base_range_pct < StrategyConfig.BREAKOUT_MAX_BASE_RANGE_PCT
 
+        # Expose resistance level + base low for TargetCalculator (downstream step).
+        # These are the shift(1) rolling values — no lookahead bias.
+        df["pivot_price"]    = safe_resistance.round(2)
+        df["base_low_price"] = safe_base_low.round(2)
+
         # ── Prior uptrend: stock must have a meaningful run before the base ─
         # O'Neil / Minervini: institutional accumulation only occurs after a stock
         # has already proven itself with a strong prior uptrend.  A stock sitting

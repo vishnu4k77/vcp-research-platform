@@ -24,6 +24,7 @@ from app.signals.rs_signal import RSSignal
 from app.signals.minervini_signal import MinerviniSignal
 from app.signals.darvas_signal import DarvasSignal
 from app.signals.composite_ranker import CompositeRanker
+from app.signals.target_calculator import TargetCalculator
 
 logger = get_logger(__name__)
 
@@ -40,9 +41,11 @@ class SignalPipeline:
       6.  QualitySignal   → quality_signal     (reads stage2_signal, trend_score)
       7.  BreakoutSignal  → breakout_signal    (reads high_52w from features)
       8.  RSSignal        → rs_signal, rs_value, rs_new_high  (reads Nifty series)
-      9.  MinerviniSignal → minervini_signal   (reads rs_signal — must follow RSSignal)
+      9.  MinerviniSignal  → minervini_signal   (reads rs_signal — must follow RSSignal)
       10. DarvasSignal    → darvas_signal      (reads high_52w, ema_150)
       11. CompositeRanker → composite_score, composite_rank, institutional_candidate
+      12. TargetCalculator→ target_1_pct, target_2_pct, risk_reward_t2, upside_prob_pct
+                            (reads pivot_price from BreakoutSignal + composite_score)
     """
 
     REQUIRED_COLUMNS: list[str] = [
@@ -101,6 +104,15 @@ class SignalPipeline:
         "rs_new_high",      # rs_value at 52w rolling max (BIT)
         "minervini_signal", # all 8 Trend Template conditions (BIT)
         "darvas_signal",    # Darvas box breakout near 52w high (BIT)
+        # Phase 2B additions — price targets + daily-updating probability
+        # pivot_price: 20-day resistance level in ₹ (from BreakoutSignal)
+        # base_low_price is NOT here — it is an intermediate used only by TargetCalculator
+        "pivot_price",      # resistance level in ₹ (shift-1 rolling max, no lookahead)
+        "base_range_pct",   # (pivot - base_low) / pivot × 100  — base tightness
+        "target_1_pct",     # % upside from close to T1 (pivot + base_range × 0.5)
+        "target_2_pct",     # % upside from close to T2 (pivot + base_range × 1.0)
+        "risk_reward_t2",   # T2_pct / STOP_LOSS_PCT  (e.g. 15 / 7 = 2.14)
+        "upside_prob_pct",  # formula-based probability; updates daily (see TargetConfig)
     ]
 
     # ── Data loading ──────────────────────────────────────────────────────────
@@ -350,6 +362,9 @@ class SignalPipeline:
             symbol_df = MinerviniSignal.calculate(symbol_df)
             symbol_df = DarvasSignal.calculate(symbol_df)
             symbol_df = CompositeRanker.calculate(symbol_df)
+            # Must follow CompositeRanker (needs composite_score) and BreakoutSignal
+            # (needs pivot_price / base_low_price exposed as columns).
+            symbol_df = TargetCalculator.calculate(symbol_df)
             return symbol_df
 
         except Exception as exc:

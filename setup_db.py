@@ -277,6 +277,15 @@ COLUMN_MIGRATIONS = [
     ("stock_signals", "rs_new_high",      "BIT   NULL"),  # RS value at 52-week rolling max
     ("stock_signals", "minervini_signal", "BIT   NULL"),  # all 8 Trend Template conditions
     ("stock_signals", "darvas_signal",    "BIT   NULL"),  # Darvas box breakout near 52w high
+    # stock_signals — Phase 2B: price targets + daily-updating probability (TargetCalculator)
+    # base_low_price is NOT stored — it is an intermediate used only inside TargetCalculator.
+    # After adding these 6 columns total OUTPUT_COLUMNS = 30; SQL_BATCH_SIZE reduced to 65.
+    ("stock_signals", "pivot_price",     "FLOAT NULL"),   # 20-day resistance level in ₹
+    ("stock_signals", "base_range_pct",  "FLOAT NULL"),   # base width % of pivot
+    ("stock_signals", "target_1_pct",    "FLOAT NULL"),   # % upside to T1 from close
+    ("stock_signals", "target_2_pct",    "FLOAT NULL"),   # % upside to T2 from close
+    ("stock_signals", "risk_reward_t2",  "FLOAT NULL"),   # T2_pct / 7% stop
+    ("stock_signals", "upside_prob_pct", "FLOAT NULL"),   # formula-based probability (updates daily)
     # saved_queries — distinguishes seeded samples (1) from user-saved queries (0)
     ("saved_queries",  "is_sample",       "BIT NOT NULL CONSTRAINT df_sq_sample DEFAULT 0"),
 ]

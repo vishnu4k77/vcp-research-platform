@@ -146,9 +146,9 @@ class StrategyConfig:
     DATA_QUALITY_MAX_VOLUME_MULTIPLIER = 100.0
 
     # SQL Server bulk-insert batch size.
-    # Limit: 2100 params / 24 columns (open/high/low/is_earnings_day added) = 87 rows max.
-    # Using 80 for headroom against future column additions.
-    SQL_BATCH_SIZE = 80
+    # Limit: 2100 params / 30 columns (Phase 2B: +6 target columns) = 70 rows max.
+    # Using 65 for headroom against future column additions.
+    SQL_BATCH_SIZE = 65
 
     # Fundamental filters — used by QualitySignal when stock_fundamentals data exists.
     # All numeric thresholds are config-driven so changes never require code edits.
@@ -485,6 +485,53 @@ class DarvasConfig:
 
     # Suppress Darvas breakout on earnings day (event-driven volume ≠ accumulation).
     FILTER_EARNINGS_DAYS: bool = True
+
+
+class TargetConfig:
+    """Price target and probability computation — appended to every signal row daily.
+
+    Targets use the measured-move method (O'Neil / Minervini):
+        T1 = pivot_price + base_range × T1_MULTIPLIER   (half measured move)
+        T2 = pivot_price + base_range × T2_MULTIPLIER   (full measured move)
+
+    base_range  = pivot_price - base_low_price  (20-day base width in ₹)
+    pivot_price = 20-day prior rolling-max close (resistance, shift(1) — no lookahead)
+
+    upside_prob_pct is formula-driven and updates daily because its inputs
+    (composite_score, signals, stage2_days) recompute fresh on every pipeline run.
+    It is NOT a backtest-calibrated statistic — show it as "Est. Prob%" in the UI.
+
+    To recalibrate after backtest history accumulates:
+        1. Run scripts/run_backtest.py over a 2-3 year window
+        2. Compute actual T2 hit rates grouped by signal type
+        3. Replace BASE_PROB_PCT and PROB_ADJ_* with empirical values
+    """
+
+    T1_MULTIPLIER: float = 0.50   # T1 = pivot + base_range × 0.5
+    T2_MULTIPLIER: float = 1.00   # T2 = pivot + base_range × 1.0
+
+    # Must mirror BacktestConfig.STOP_LOSS_PCT — keeps R:R denominator consistent
+    STOP_LOSS_PCT: float = 0.07   # 7% below entry close
+
+    # ── Probability model — baseline + per-signal quality adjustments ──────────
+    # Baseline calibrated to our own backtest: 44.2% win rate with breakout_signal
+    # (20% target, 7% stop, 60-day hold).  Adjustments are additive, capped at MAX_PROB_PCT.
+    BASE_PROB_PCT: float = 40.0
+
+    PROB_ADJ_BREAKOUT_SIGNAL:  float =  5.0  # breakout confirmed (vs setup only)
+    PROB_ADJ_MINERVINI_SIGNAL: float =  8.0  # all 8 Trend Template conditions met
+    PROB_ADJ_RS_NEW_HIGH:      float =  5.0  # RS line at 1-year rolling high
+    PROB_ADJ_DARVAS_SIGNAL:    float =  7.0  # near 52w high — minimal overhead supply
+    PROB_ADJ_HIGH_SCORE:       float =  5.0  # composite_score >= HIGH_SCORE_THRESHOLD
+    PROB_ADJ_FRESH_STAGE2:     float =  3.0  # stage2_days <= FRESH_STAGE2_DAYS (early run)
+    PROB_ADJ_LATE_STAGE2:      float = -5.0  # stage2_days > LATE_STAGE2_DAYS (distribution risk)
+
+    HIGH_SCORE_THRESHOLD: float = 80.0
+    FRESH_STAGE2_DAYS:    int   = 20
+    LATE_STAGE2_DAYS:     int   = 60
+
+    MAX_PROB_PCT: float = 75.0   # cap — markets are never certain
+    MIN_PROB_PCT: float = 20.0   # floor — even weak setups carry some base probability
 
 
 class ScannerQueryConfig:
