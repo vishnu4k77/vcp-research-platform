@@ -6,6 +6,7 @@ from app.monitoring.pipeline_monitor import PipelineMonitor
 from app.pipeline.pipeline_context import PipelineContext
 from app.main import DataIngestionPipeline
 from app.data.earnings_service import EarningsService
+from app.data.data_quality_service import DataQualityService
 from app.features.feature_pipeline import FeaturePipeline
 from app.regime.regime_pipeline import RegimePipeline
 from app.signals.signal_pipeline import SignalPipeline
@@ -79,7 +80,20 @@ class MasterPipeline:
             ):
                 return MasterPipeline._finalize(context)
 
-        # ── Step 2: Earnings dates refresh (non-blocking) ────────────────
+        # ── Step 2: Data quality checks + auto-remediation ───────────────
+        # Must run BEFORE features so stale rows don't contaminate EMA/ATR.
+        # Non-blocking: quality failures are logged but never abort the pipeline.
+        logger.info("── Step [data_quality] starting")
+        try:
+            DataQualityService.run()
+            context.mark_step_completed("data_quality")
+            logger.info("── Step [data_quality] completed")
+        except Exception as exc:
+            logger.warning("── Step [data_quality] failed (non-blocking): %s", exc)
+            context.add_warning(f"Data quality step failed: {exc}")
+            context.mark_step_completed("data_quality")
+
+        # ── Step 3: Earnings dates refresh (non-blocking) ────────────────
         # Refreshes stock_earnings_dates for all active symbols so FeaturePipeline
         # can mark is_earnings_day correctly.  Stale-check (STALE_AFTER_DAYS)
         # means Yahoo is only called when data is > 7 days old — not every run.

@@ -189,6 +189,21 @@ TABLE_DDL = {
         )
     """,
 
+    # Data quality audit — one row per issue found per daily run.
+    # check_type: 'stale_delete' | 'gap_detected' | 'thin_history'
+    # rows_affected: rows deleted (stale_delete) or 0 (log-only checks)
+    "data_quality_log": """
+        CREATE TABLE data_quality_log (
+            id            INT           IDENTITY(1,1) NOT NULL,
+            run_date      DATE          NOT NULL CONSTRAINT df_dql_date DEFAULT CAST(GETDATE() AS DATE),
+            check_type    VARCHAR(30)   NOT NULL,
+            symbol        VARCHAR(30)   NOT NULL,
+            description   VARCHAR(500)  NULL,
+            rows_affected INT           NOT NULL CONSTRAINT df_dql_rows DEFAULT 0,
+            CONSTRAINT pk_data_quality_log PRIMARY KEY (id)
+        )
+    """,
+
     # Sector rotation scores — one row per (trade_date, sector).
     # Computed by SectorMomentum after each SignalPipeline run.
     # momentum_score is the weighted composite; momentum_rank is cross-sector rank (1=best).
@@ -330,6 +345,7 @@ REQUIRED_TABLES = [
     "fundamental_filter_config",  # fundamental threshold config — editable in SQL
     "scanner_preset_config",      # scanner preset weights — editable in SQL without code changes
     "stock_earnings_dates",       # Yahoo Finance earnings dates — used for is_earnings_day flag
+    "data_quality_log",           # daily quality audit — stale deletes, gaps, thin history
     "sector_momentum",            # sector rotation scores — computed after each signal run
     "saved_queries",              # user-saved scanner SQL strings from the dashboard UI
 ]
