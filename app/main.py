@@ -148,7 +148,6 @@ class DataIngestionPipeline:
                 engine,
                 if_exists="append",
                 index=False,
-                method="multi",
                 chunksize=250,
             )
             logger.info("Inserted %s rows for %s", rows, ticker)

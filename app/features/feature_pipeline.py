@@ -250,7 +250,6 @@ class FeaturePipeline:
                 engine,
                 if_exists="append",
                 index=False,
-                method="multi",
                 chunksize=StrategyConfig.SQL_BATCH_SIZE,
             )
             logger.info("Saved %d feature rows to stock_features", len(final_df))
