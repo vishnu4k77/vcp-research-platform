@@ -125,4 +125,19 @@ class TargetCalculator:
         # NaN when pivot unavailable — keeps NULL in the DB instead of a meaningless float
         df["upside_prob_pct"] = np.where(safe_pivot.notna(), clipped, np.nan)
 
+        # ── Expected Value score — primary scanner rank driver ────────────
+        # EV% = (P × T2%) − (1−P) × stop%
+        # This is the statistically correct measure of profit-per-rupee-risked.
+        # Positive EV = edge exists. Higher EV = better trade, accounting for
+        # both upside magnitude AND probability simultaneously.
+        # Example: P=0.56, T2=24.4%, stop=7% → EV = 13.7 − 3.1 = +10.6%
+        # NaN propagates when T2 is NaN (no valid base / pivot).
+        p     = clipped / 100
+        ev    = (p * df["target_2_pct"]) - ((1 - p) * stop_pct)
+        df["ev_score"] = np.where(
+            df["target_2_pct"].notna(),
+            ev.round(2),
+            np.nan,
+        )
+
         return df

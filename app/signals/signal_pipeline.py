@@ -113,6 +113,7 @@ class SignalPipeline:
         "target_2_pct",     # % upside from close to T2 (pivot + base_range × 1.0)
         "risk_reward_t2",   # T2_pct / STOP_LOSS_PCT  (e.g. 15 / 7 = 2.14)
         "upside_prob_pct",  # formula-based probability; updates daily (see TargetConfig)
+        "ev_score",         # Expected Value = (P×T2%) − (1−P)×7% — primary rank driver
     ]
 
     # ── Data loading ──────────────────────────────────────────────────────────

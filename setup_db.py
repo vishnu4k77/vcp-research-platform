@@ -286,6 +286,7 @@ COLUMN_MIGRATIONS = [
     ("stock_signals", "target_2_pct",    "FLOAT NULL"),   # % upside to T2 from close
     ("stock_signals", "risk_reward_t2",  "FLOAT NULL"),   # T2_pct / 7% stop
     ("stock_signals", "upside_prob_pct", "FLOAT NULL"),   # formula-based probability (updates daily)
+    ("stock_signals", "ev_score",       "FLOAT NULL"),   # EV% = (P×T2%) − (1−P)×7% — primary rank
     # saved_queries — distinguishes seeded samples (1) from user-saved queries (0)
     ("saved_queries",  "is_sample",       "BIT NOT NULL CONSTRAINT df_sq_sample DEFAULT 0"),
 ]

@@ -233,6 +233,13 @@ def _apply_preset_weights(df: pd.DataFrame, weights: dict[str, int]) -> pd.DataF
     )
     df["institutional_candidate"] = np.where(df["composite_score"] >= 70, 1, 0)
 
+    # Sort by EV% first (highest expected value = best trade), then composite score
+    if "ev_score" in df.columns:
+        return df.sort_values(
+            ["ev_score", "composite_score"],
+            ascending=[False, False],
+            na_position="last",
+        )
     return df.sort_values("composite_score", ascending=False)
 
 
@@ -273,6 +280,7 @@ _DISPLAY_NAMES: dict[str, str] = {
     "target_2_pct":                "T2 %",
     "risk_reward_t2":              "R:R",
     "upside_prob_pct":             "Est Prob%",
+    "ev_score":                    "EV%",
     "fund_quality_score":          "Fund Score",
     "fund_promoter_pct":           "Promoter%",
     "fund_roe":                    "ROE%",
@@ -378,6 +386,19 @@ def _style_prob(val) -> str:
         if v >= 55.0:
             return f"color: {GREEN}; font-weight: 700"
         if v >= 45.0:
+            return f"color: {ORANGE}; font-weight: 600"
+        return f"color: {RED}"
+    except (TypeError, ValueError):
+        return f"color: {TEXT_MUTED}"
+
+
+def _style_ev(val) -> str:
+    """Color EV%: green ≥ 5%, orange ≥ 0%, red < 0% (negative expected value = avoid)."""
+    try:
+        v = float(val)
+        if v >= 5.0:
+            return f"color: {GREEN}; font-weight: 700"
+        if v >= 0.0:
             return f"color: {ORANGE}; font-weight: 600"
         return f"color: {RED}"
     except (TypeError, ValueError):
@@ -648,6 +669,7 @@ def render_scanner_table() -> None:
         _DISPLAY_NAMES.get("target_2_pct", "T2 %"):     "{:.1f}%",
         _DISPLAY_NAMES.get("risk_reward_t2","R:R"):      "{:.2f}",
         _DISPLAY_NAMES.get("upside_prob_pct","Est Prob%"): "{:.1f}%",
+        _DISPLAY_NAMES.get("ev_score",       "EV%"):       "{:.1f}%",
     }
     if "fund_promoter_pct" in df.columns:
         fmt[_DISPLAY_NAMES["fund_promoter_pct"]] = "{:.1f}%"
@@ -661,6 +683,7 @@ def render_scanner_table() -> None:
     t2_col       = _DISPLAY_NAMES.get("target_2_pct",   "T2 %")
     rr_col       = _DISPLAY_NAMES.get("risk_reward_t2", "R:R")
     prob_col     = _DISPLAY_NAMES.get("upside_prob_pct","Est Prob%")
+    ev_col       = _DISPLAY_NAMES.get("ev_score",       "EV%")
 
     styled = display.style.map(_style_signals, subset=sig_display_names)
     if score_col in display.columns:
@@ -677,6 +700,8 @@ def render_scanner_table() -> None:
         styled = styled.map(_style_risk_reward, subset=[rr_col])
     if prob_col in display.columns:
         styled = styled.map(_style_prob, subset=[prob_col])
+    if ev_col in display.columns:
+        styled = styled.map(_style_ev, subset=[ev_col])
     styled = styled.format(fmt, na_rep="—")
 
     # Only set explicit widths for non-boolean columns.
@@ -696,6 +721,7 @@ def render_scanner_table() -> None:
         "T2 %":        st.column_config.NumberColumn(format="%.1f%%", width=65),
         "R:R":         st.column_config.NumberColumn(format="%.2f",   width=60),
         "Est Prob%":   st.column_config.NumberColumn(format="%.1f%%", width=85),
+        "EV%":         st.column_config.NumberColumn(format="%.1f%%", width=72),
         "Fund Score":  st.column_config.NumberColumn(format="%.1f", width=85),
         "Promoter%":   st.column_config.NumberColumn(format="%.1f%%", width=88),
         "ROE%":        st.column_config.NumberColumn(format="%.1f%%", width=65),

@@ -313,6 +313,7 @@ class ScannerService:
                 ss.target_2_pct,
                 ss.risk_reward_t2,
                 ss.upside_prob_pct,
+                ss.ev_score,
                 sf.quality_score        AS fund_quality_score,
                 sf.promoter_holding     AS fund_promoter_pct,
                 sf.roe                  AS fund_roe,
@@ -328,7 +329,11 @@ class ScannerService:
             {index_join}
             WHERE ss.trade_date    = :trade_date
               AND ss.composite_score >= :min_score
-            ORDER BY ss.composite_score DESC, ss.symbol ASC
+            ORDER BY
+                CASE WHEN ss.ev_score IS NULL THEN 1 ELSE 0 END ASC,
+                ss.ev_score DESC,
+                ss.composite_score DESC,
+                ss.symbol ASC
         """)
 
         params: dict = {
