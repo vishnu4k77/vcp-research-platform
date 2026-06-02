@@ -495,7 +495,6 @@ class SignalPipeline:
                 engine,
                 if_exists="append",
                 index=False,
-                method="multi",
                 chunksize=StrategyConfig.SQL_BATCH_SIZE,
             )
             logger.info("Saved %d signal rows to stock_signals", len(final_df))

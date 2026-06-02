@@ -145,10 +145,11 @@ class StrategyConfig:
     DATA_QUALITY_MAX_DAILY_MOVE_RATIO = 5.0
     DATA_QUALITY_MAX_VOLUME_MULTIPLIER = 100.0
 
-    # SQL Server bulk-insert batch size.
-    # Limit: 2100 params / 30 columns (Phase 2B: +6 target columns) = 70 rows max.
-    # Using 65 for headroom against future column additions.
-    SQL_BATCH_SIZE = 65
+    # SQL Server bulk-insert batch size (rows per executemany chunk).
+    # fast_executemany=True on the engine (db.py) uses ODBC batch mode — the
+    # old 2100-parameter multi-row INSERT limit no longer applies.
+    # 1000 rows per chunk balances memory and ODBC throughput.
+    SQL_BATCH_SIZE = 1000
 
     # Fundamental filters — used by QualitySignal when stock_fundamentals data exists.
     # All numeric thresholds are config-driven so changes never require code edits.

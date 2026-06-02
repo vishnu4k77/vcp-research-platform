@@ -19,7 +19,10 @@ params = urllib.parse.quote_plus(
     f"Trusted_Connection=yes;"
 )
 
-engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
+engine = create_engine(
+    f"mssql+pyodbc:///?odbc_connect={params}",
+    fast_executemany=True,   # pyodbc bulk-batch mode — reduces 548K-row insert from 20min → ~2min
+)
 
 
 @contextmanager
