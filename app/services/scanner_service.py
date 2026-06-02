@@ -13,7 +13,7 @@ from typing import Optional
 import pandas as pd
 from sqlalchemy import text
 
-from app.config.db import nolock_connect
+from app.config.db import engine, nolock_connect
 from app.config.logging_config import get_logger
 from app.config.strategy_config import DashboardConfig, StrategyConfig
 
@@ -830,3 +830,123 @@ class ScannerService:
         except Exception as exc:
             logger.error("get_symbol_display_options failed: %s", exc, exc_info=True)
             return []
+
+    # ── Saved queries ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def save_query(name: str, sql_text: str, description: str = "") -> tuple[bool, str]:
+        """Save or overwrite a named scanner query.
+
+        Uses MERGE so saving with an existing name updates the row instead of
+        raising a duplicate-key error.
+
+        Args:
+            name:        Display name (max 100 chars).
+            sql_text:    Full SQL string (WHERE … ORDER BY …).
+            description: Optional notes shown under the saved-query chip.
+
+        Returns:
+            (True, success_message) or (False, error_message).
+        """
+        name = name.strip()[:100]
+        if not name:
+            return False, "Query name cannot be empty."
+        if not sql_text.strip():
+            return False, "Query is empty — enter a WHERE clause first."
+
+        stmt = text("""
+            MERGE saved_queries AS target
+            USING (SELECT :name AS query_name) AS src
+                ON target.query_name = src.query_name
+            WHEN MATCHED THEN
+                UPDATE SET
+                    sql_text    = :sql_text,
+                    description = :desc,
+                    is_active   = 1
+            WHEN NOT MATCHED THEN
+                INSERT (query_name, sql_text, description)
+                VALUES (:name, :sql_text, :desc);
+        """)
+        try:
+            with engine.begin() as conn:
+                conn.execute(stmt, {
+                    "name":     name,
+                    "sql_text": sql_text.strip(),
+                    "desc":     description.strip(),
+                })
+            logger.info("save_query | name=%r", name)
+            return True, f'Query "{name}" saved.'
+        except Exception as exc:
+            logger.error("save_query failed: %s", exc, exc_info=True)
+            return False, f"Save failed: {exc}"
+
+    @staticmethod
+    def list_saved_queries() -> pd.DataFrame:
+        """Return active user-saved queries (is_sample = 0), newest first.
+
+        Sample queries seeded by setup_db.py are excluded here; use
+        list_sample_queries() to retrieve those.
+
+        Returns:
+            DataFrame with columns: id, query_name, description, sql_text, created_at.
+            Empty DataFrame on error or no rows.
+        """
+        query = text("""
+            SELECT id, query_name, description, sql_text, created_at
+            FROM saved_queries
+            WHERE is_active = 1
+              AND is_sample  = 0
+            ORDER BY created_at DESC
+        """)
+        try:
+            with nolock_connect() as conn:
+                return pd.read_sql(query, conn)
+        except Exception as exc:
+            logger.error("list_saved_queries failed: %s", exc, exc_info=True)
+            return pd.DataFrame()
+
+    @staticmethod
+    def list_sample_queries() -> pd.DataFrame:
+        """Return active built-in sample queries (is_sample = 1), ordered by name.
+
+        These are seeded by setup_db._seed_sample_queries() from
+        ScannerQueryConfig.SAMPLE_QUERIES and shown in the UI "Sample queries"
+        expander.  They are never mixed with user-saved rows.
+
+        Returns:
+            DataFrame with columns: id, query_name, description, sql_text.
+            Empty DataFrame on error or if the column does not yet exist.
+        """
+        query = text("""
+            SELECT id, query_name, description, sql_text
+            FROM saved_queries
+            WHERE is_active = 1
+              AND is_sample  = 1
+            ORDER BY query_name ASC
+        """)
+        try:
+            with nolock_connect() as conn:
+                return pd.read_sql(query, conn)
+        except Exception as exc:
+            logger.error("list_sample_queries failed: %s", exc, exc_info=True)
+            return pd.DataFrame()
+
+    @staticmethod
+    def delete_query(query_id: int) -> tuple[bool, str]:
+        """Soft-delete a saved query by id (sets is_active = 0).
+
+        Args:
+            query_id: Primary key of the row to remove.
+
+        Returns:
+            (True, message) or (False, error_message).
+        """
+        stmt = text("UPDATE saved_queries SET is_active = 0 WHERE id = :qid")
+        try:
+            with engine.begin() as conn:
+                conn.execute(stmt, {"qid": query_id})
+            logger.info("delete_query | id=%d", query_id)
+            return True, "Query deleted."
+        except Exception as exc:
+            logger.error("delete_query failed: %s", exc, exc_info=True)
+            return False, f"Delete failed: {exc}"

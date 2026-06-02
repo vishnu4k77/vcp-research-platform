@@ -306,6 +306,12 @@ class DashboardConfig:
     # Cache TTL for Streamlit @st.cache_data (seconds)
     CACHE_TTL_SECONDS: int = 300
 
+    # SQL query text-area — height auto-scales with query length
+    QUERY_BOX_MIN_HEIGHT_PX: int = 68    # floor: shows ~2 lines
+    QUERY_BOX_MAX_HEIGHT_PX: int = 180   # ceiling: prevents the box eating the screen
+    QUERY_BOX_CHARS_PER_LINE: int = 110  # approx chars per wrapped line at default font
+    QUERY_BOX_LINE_HEIGHT_PX: int = 24   # pixels per text line (Streamlit default)
+
     # Sector heatmap — display label → DataFrame column mapping.
     # Keys are shown in the UI selectbox; values are computed column names.
     # Stage 2 is suppressed in BEAR, so RS is the most useful default.
@@ -479,3 +485,178 @@ class DarvasConfig:
 
     # Suppress Darvas breakout on earnings day (event-driven volume ≠ accumulation).
     FILTER_EARNINGS_DAYS: bool = True
+
+
+class ScannerQueryConfig:
+    """Built-in sample queries seeded into saved_queries (is_sample = 1).
+
+    Each entry covers a distinct SQL syntax feature so users can discover
+    the query language by example.  Update this list to change what appears
+    in the "Sample queries" expander — no UI code changes required.
+
+    Keys per dict:
+        query_name  : unique identifier (max 100 chars) — shown as the button label.
+        description : one-line explanation shown as tooltip.
+        sql_text    : full WHERE … ORDER BY string accepted by the scanner parser.
+
+    Syntax coverage:
+        Boolean flags       — IC, Trend, Stage2, VCP, Breakout, "BO Ready",
+                              Liquid, Quality, RS  (= 1 or = 0)
+        Numeric comparisons — Score, "Dist Pivot%", "Dist 52w%",
+                              "Fund Score", ROE%, ROCE%, Promoter%
+        BETWEEN             — "S2 Age(d)" BETWEEN x AND y
+        Negative range      — "Dist 52w%" BETWEEN -25 AND -5
+        Tick alias          — Liquid = tick  (same as Liquid = 1)
+        OR group            — (VCP = 1 OR Breakout = 1 OR "BO Ready" = 1)
+        Multiple ORDER BY   — Score DESC / "S2 Age(d)" ASC / ROE% DESC / etc.
+    """
+
+    SAMPLE_QUERIES: list[dict] = [
+        # ── 1. BETWEEN + boolean + ASC sort ──────────────────────────────────
+        {
+            "query_name": "01 · Fresh Stage 2 + RS leaders",
+            "description": (
+                "Early Stage 2 stocks (1–15 days in) outperforming Nifty 50. "
+                "Lower S2 Age = fresher entry. Demonstrates BETWEEN syntax."
+            ),
+            "sql_text": (
+                'WHERE Stage2 = 1 AND "S2 Age(d)" BETWEEN 1 AND 15 '
+                'AND RS = 1 AND Liquid = 1 ORDER BY "S2 Age(d)" ASC'
+            ),
+        },
+        # ── 2. Dist Pivot% + IC + numeric sort ───────────────────────────────
+        {
+            "query_name": "02 · IC candidates near pivot (≤ 2%)",
+            "description": (
+                "Institutional-candidate stocks within 2 % of resistance pivot. "
+                "Demonstrates Dist Pivot% numeric filter + ASC sort."
+            ),
+            "sql_text": (
+                'WHERE IC = 1 AND "Dist Pivot%" <= 2 AND Liquid = 1 '
+                'ORDER BY "Dist Pivot%" ASC'
+            ),
+        },
+        # ── 3. ROE / ROCE / Promoter% ─────────────────────────────────────────
+        {
+            "query_name": "03 · Quality compounders (ROE + ROCE)",
+            "description": (
+                "Strong return ratios AND high promoter holding in an uptrend. "
+                "Demonstrates ROE%, ROCE%, Promoter% numeric filters."
+            ),
+            "sql_text": (
+                "WHERE Quality = 1 AND ROE% >= 20 AND ROCE% >= 15 "
+                "AND Promoter% >= 40 AND Trend = 1 ORDER BY ROE% DESC"
+            ),
+        },
+        # ── 4. Breakout + Dist 52w% ───────────────────────────────────────────
+        {
+            "query_name": "04 · Fresh breakouts near 52-week high",
+            "description": (
+                "Breakout-day signals within 3 % of 52-week high — minimal overhead supply. "
+                "Demonstrates Breakout flag + Dist 52w% negative threshold."
+            ),
+            "sql_text": (
+                'WHERE Breakout = 1 AND "Dist 52w%" >= -3 AND Liquid = 1 '
+                'ORDER BY "Dist Pivot%" ASC'
+            ),
+        },
+        # ── 5. VCP + Score numeric ────────────────────────────────────────────
+        {
+            "query_name": "05 · VCP coiling — high composite score",
+            "description": (
+                "VCP pattern stocks in Stage 2 uptrend with Score ≥ 70. "
+                "Demonstrates VCP boolean + Score numeric filter."
+            ),
+            "sql_text": (
+                "WHERE VCP = 1 AND Stage2 = 1 AND Trend = 1 AND Score >= 70 "
+                "ORDER BY Score DESC"
+            ),
+        },
+        # ── 6. BO Ready + Promoter% ───────────────────────────────────────────
+        {
+            "query_name": "06 · BO Ready + promoter conviction (≥ 50 %)",
+            "description": (
+                "Breakout-ready setups backed by promoters holding ≥ 50 %. "
+                "Demonstrates 'BO Ready' (quoted field) + Promoter% filter."
+            ),
+            "sql_text": (
+                'WHERE "BO Ready" = 1 AND Promoter% >= 50 AND Quality = 1 '
+                "ORDER BY Score DESC"
+            ),
+        },
+        # ── 7. Fund Score + ROE ────────────────────────────────────────────────
+        {
+            "query_name": "07 · Strong fundamentals in Stage 2",
+            "description": (
+                "Fund Score ≥ 7 AND ROE ≥ 15 % in active Stage 2. "
+                "Demonstrates Fund Score numeric filter + DESC sort."
+            ),
+            "sql_text": (
+                'WHERE Stage2 = 1 AND "Fund Score" >= 7 AND ROE% >= 15 '
+                'AND Liquid = 1 ORDER BY "Fund Score" DESC'
+            ),
+        },
+        # ── 8. OR group (parenthesised) ───────────────────────────────────────
+        {
+            "query_name": "08 · Multi-signal entry — OR trigger group",
+            "description": (
+                "IC + trend aligned, RS leading, with at least one entry trigger (VCP OR Breakout OR BO Ready). "
+                "Demonstrates parenthesised OR group syntax."
+            ),
+            "sql_text": (
+                "WHERE IC = 1 AND Trend = 1 AND Stage2 = 1 AND RS = 1 "
+                'AND (VCP = 1 OR Breakout = 1 OR "BO Ready" = 1) '
+                "ORDER BY Score DESC"
+            ),
+        },
+        # ── 9. Mid Stage 2 BETWEEN ────────────────────────────────────────────
+        {
+            "query_name": "09 · Mid Stage 2 sweet spot (10 – 30 days)",
+            "description": (
+                "Stage 2 stocks 10–30 trading days old — past the early rush, "
+                "before late-stage extension risk. Demonstrates BETWEEN on "
+                "S2 Age(d) with a wider range."
+            ),
+            "sql_text": (
+                'WHERE Stage2 = 1 AND "S2 Age(d)" BETWEEN 10 AND 30 '
+                "AND Liquid = 1 AND RS = 1 ORDER BY Score DESC"
+            ),
+        },
+        # ── 10. Dist 52w% negative BETWEEN ───────────────────────────────────
+        {
+            "query_name": "10 · Deep pullback base builders (−25 % to −15 %)",
+            "description": (
+                "IC-qualified stocks 15–25 % below 52-week high — potential base "
+                "formation zone. Demonstrates BETWEEN with negative bounds."
+            ),
+            "sql_text": (
+                'WHERE IC = 1 AND "Dist 52w%" BETWEEN -25 AND -15 '
+                "AND Liquid = 1 AND Quality = 1 "
+                'ORDER BY "Dist 52w%" DESC'
+            ),
+        },
+        # ── 11. Promoter% + RS + Trend ────────────────────────────────────────
+        {
+            "query_name": "11 · Promoter-backed RS leaders (≥ 60 %)",
+            "description": (
+                "High promoter holding + relative strength + liquid. "
+                "Demonstrates Promoter% >= 60 sort."
+            ),
+            "sql_text": (
+                "WHERE RS = 1 AND Promoter% >= 60 AND Liquid = 1 AND Trend = 1 "
+                "ORDER BY Promoter% DESC"
+            ),
+        },
+        # ── 12. tick alias ────────────────────────────────────────────────────
+        {
+            "query_name": "12 · Top score — tick alias (= tick / = true / = 1)",
+            "description": (
+                "Score ≥ 80 with all quality signals using 'tick' alias for boolean 1. "
+                "Demonstrates: Liquid = tick, Quality = tick, RS = tick (all equivalent to = 1)."
+            ),
+            "sql_text": (
+                "WHERE Score >= 80 AND Liquid = tick AND Quality = tick "
+                "AND RS = tick ORDER BY Score DESC"
+            ),
+        },
+    ]

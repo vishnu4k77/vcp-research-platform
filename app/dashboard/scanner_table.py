@@ -17,6 +17,7 @@ import streamlit as st
 from app.config.strategy_config import DashboardConfig, FundamentalsConfig, StrategyConfig
 from app.services.scanner_service import ScannerService
 from app.dashboard.styles import GREEN, RED, ORANGE, BLUE, TEXT_MUTED, section_title
+from app.dashboard.scanner_filters import render_filter_bar
 
 
 # ── Calendar enhancements (JS template — min_date injected at render time) ────
@@ -423,23 +424,6 @@ def render_scanner_table() -> None:
             key="scanner_min_score",
         )
 
-        st.divider()
-        st.caption("Signal must-have filters")
-
-        must_have: list[str] = []
-        signal_labels = {
-            "trend_signal":     "Trend",
-            "stage2_signal":    "Stage 2",
-            "vcp_signal":       "VCP",
-            "breakout_signal":  "Breakout",
-            "liquidity_signal": "Liquidity",
-            "quality_signal":   "Quality",
-            "rs_signal":        "RS (vs Nifty)",
-        }
-        for col, label in signal_labels.items():
-            if st.checkbox(label, key=f"must_{col}"):
-                must_have.append(col)
-
         # Inject calendar JS inside the sidebar so the hidden <img> renders there.
         # Must be inside `with st.sidebar` — if called in the main area the img
         # HTML appears as visible text even with display:none.
@@ -540,24 +524,6 @@ def render_scanner_table() -> None:
             return
         df = df_search
 
-    # ── Signal must-have filter ───────────────────────────────────────────────
-    _bear_directional = {"trend_signal", "stage2_signal", "vcp_signal", "breakout_signal"}
-    bear_signals_checked = bool(must_have and set(must_have) & _bear_directional)
-
-    for col in must_have:
-        if col in df.columns:
-            df = df[df[col] == 1]
-
-    if df.empty:
-        if bear_mode and bear_signals_checked:
-            st.info(
-                "No stocks match — Trend / Stage 2 / VCP / Breakout must-have filters "
-                "are all 0 on this BEAR date. Uncheck those filters or pick an older date."
-            )
-        else:
-            st.info("No stocks match the selected signal filters.")
-        return
-
     # ── Header metrics ────────────────────────────────────────────────────────
     preset_badge = (
         f"<span style='background:{BLUE}20;color:{BLUE};border:1px solid {BLUE}40;"
@@ -585,9 +551,7 @@ def render_scanner_table() -> None:
         )
         st.caption(f"Preset weights: {weights_str}")
 
-    st.divider()
-
-    # ── Table ─────────────────────────────────────────────────────────────────
+    # ── Build display DataFrame ───────────────────────────────────────────────
     # Core columns always shown (stage2_started_date excluded — too wide for table view)
     # fundamental columns appended when data exists
     _EXCLUDED_FROM_TABLE = {"stage2_started_date"}
@@ -601,6 +565,26 @@ def render_scanner_table() -> None:
     display_cols = core_cols + fund_cols
     display = df[display_cols].copy()
     display.rename(columns=_DISPLAY_NAMES, inplace=True)
+
+    # ── Smart Filter bar ──────────────────────────────────────────────────────
+    # Applied to the display DataFrame (after column rename) so filter labels
+    # match exactly what the user sees in the table.
+    display = render_filter_bar(display)
+
+    if display.empty:
+        if bear_mode:
+            st.info(
+                "No stocks match the active filters on this BEAR date. "
+                "Trend / Stage2 / VCP / Breakout are all 0 — "
+                "clear signal filters or switch to a date with active signals."
+            )
+        else:
+            st.info("No stocks match the active filters. Adjust or clear filters above.")
+        return
+
+    st.divider()
+
+    # ── Table ─────────────────────────────────────────────────────────────────
     display.insert(0, "#", range(1, len(display) + 1))
 
     sig_display_names = [_DISPLAY_NAMES[c] for c in _SIGNAL_COLUMNS if c in df.columns]

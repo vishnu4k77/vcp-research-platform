@@ -35,7 +35,7 @@ from sqlalchemy import inspect, text
 
 from app.config.db import engine
 from app.config.logging_config import get_logger
-from app.config.strategy_config import DashboardConfig
+from app.config.strategy_config import DashboardConfig, ScannerQueryConfig
 
 logger = get_logger("setup_db")
 
@@ -277,7 +277,27 @@ COLUMN_MIGRATIONS = [
     ("stock_signals", "rs_new_high",      "BIT   NULL"),  # RS value at 52-week rolling max
     ("stock_signals", "minervini_signal", "BIT   NULL"),  # all 8 Trend Template conditions
     ("stock_signals", "darvas_signal",    "BIT   NULL"),  # Darvas box breakout near 52w high
+    # saved_queries — distinguishes seeded samples (1) from user-saved queries (0)
+    ("saved_queries",  "is_sample",       "BIT NOT NULL CONSTRAINT df_sq_sample DEFAULT 0"),
 ]
+
+# Saved scanner queries — user-named SQL strings stored from the dashboard UI.
+# One row per named query; soft-deleted via is_active = 0.
+# query_name has a UNIQUE constraint so saving the same name overwrites via MERGE.
+TABLE_DDL_EXTRA = {
+    "saved_queries": """
+        CREATE TABLE saved_queries (
+            id           INT            IDENTITY(1,1) NOT NULL,
+            query_name   VARCHAR(100)   NOT NULL,
+            description  VARCHAR(500)   NULL,
+            sql_text     NVARCHAR(2000) NOT NULL,
+            created_at   DATETIME       NOT NULL CONSTRAINT df_sq_created DEFAULT GETDATE(),
+            is_active    BIT            NOT NULL CONSTRAINT df_sq_active  DEFAULT 1,
+            CONSTRAINT pk_saved_queries PRIMARY KEY (id),
+            CONSTRAINT uq_sq_name       UNIQUE      (query_name)
+        )
+    """,
+}
 
 
 # ── Required tables ───────────────────────────────────────────────────────────
@@ -301,6 +321,7 @@ REQUIRED_TABLES = [
     "scanner_preset_config",      # scanner preset weights — editable in SQL without code changes
     "stock_earnings_dates",       # Yahoo Finance earnings dates — used for is_earnings_day flag
     "sector_momentum",            # sector rotation scores — computed after each signal run
+    "saved_queries",              # user-saved scanner SQL strings from the dashboard UI
 ]
 
 
@@ -523,10 +544,11 @@ def _create_missing_tables(existing: set) -> list[str]:
             logger.info("  %-30s OK", table)
             continue
 
-        if table in TABLE_DDL:
+        all_ddl = {**TABLE_DDL, **TABLE_DDL_EXTRA}
+        if table in all_ddl:
             try:
                 with engine.begin() as conn:
-                    conn.execute(text(TABLE_DDL[table]))
+                    conn.execute(text(all_ddl[table]))
                 logger.info("  %-30s CREATED", table)
                 existing.add(table)
             except Exception as exc:
@@ -729,6 +751,51 @@ def _create_indexes() -> None:
     )
 
 
+def _seed_sample_queries() -> None:
+    """Upsert built-in sample queries from ScannerQueryConfig into saved_queries.
+
+    Uses MERGE so the function is safe to re-run — existing rows are updated
+    to the latest sql_text/description from config; new rows are inserted.
+    Only touches rows where is_sample = 1 (user-saved rows are never modified).
+
+    To add or update a sample query: edit ScannerQueryConfig.SAMPLE_QUERIES
+    in strategy_config.py and re-run setup_db.py.  No UI code changes needed.
+    """
+    queries = ScannerQueryConfig.SAMPLE_QUERIES
+    if not queries:
+        logger.info("ScannerQueryConfig.SAMPLE_QUERIES is empty — skipping seed")
+        return
+
+    stmt = text("""
+        MERGE saved_queries AS target
+        USING (SELECT :name AS query_name) AS src
+            ON  target.query_name = src.query_name
+            AND target.is_sample  = 1
+        WHEN MATCHED THEN
+            UPDATE SET
+                sql_text    = :sql_text,
+                description = :desc,
+                is_active   = 1
+        WHEN NOT MATCHED THEN
+            INSERT (query_name, description, sql_text, is_sample)
+            VALUES (:name,      :desc,       :sql_text, 1);
+    """)
+
+    upserted = 0
+    try:
+        with engine.begin() as conn:
+            for q in queries:
+                conn.execute(stmt, {
+                    "name":     q["query_name"],
+                    "desc":     q.get("description", ""),
+                    "sql_text": q["sql_text"],
+                })
+                upserted += 1
+        logger.info("sample queries upserted | count=%d", upserted)
+    except Exception as exc:
+        logger.error("_seed_sample_queries failed: %s", exc, exc_info=True)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -761,6 +828,7 @@ def main() -> int:
     _seed_nse_index_ref()
     _seed_fundamental_filters()
     _seed_scanner_presets()
+    _seed_sample_queries()
 
     print("\nCreating performance indexes:")
     _create_indexes()
