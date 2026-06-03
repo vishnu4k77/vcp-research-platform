@@ -297,15 +297,18 @@ hr {{ border: none !important; border-top: 1px solid {BORDER} !important; margin
 ::-webkit-scrollbar-thumb:hover {{ background: rgba(255,255,255,0.15); }}
 
 /* ── DataFrame scrollbars — thick blue, always visible ── */
-/* Use [style] to target GDG's inline-styled scroller directly (higher specificity) */
-[data-testid="stDataFrame"] [style]::-webkit-scrollbar {{ width: 14px !important; height: 14px !important; }}
-[data-testid="stDataFrame"] [style]::-webkit-scrollbar-track {{ background: rgba(255,255,255,0.12) !important; border-radius: 7px !important; }}
-[data-testid="stDataFrame"] [style]::-webkit-scrollbar-thumb {{ background: {BLUE} !important; border-radius: 7px !important; min-width: 40px !important; min-height: 40px !important; }}
-[data-testid="stDataFrame"] [style]::-webkit-scrollbar-thumb:hover {{ background: #79b8ff !important; }}
-[data-testid="stDataFrame"] [style]::-webkit-scrollbar-corner {{ background: rgba(255,255,255,0.06) !important; }}
-/* Firefox: solid blue thumb, no thin override */
-[data-testid="stDataFrame"] * {{ scrollbar-color: {BLUE} rgba(255,255,255,0.12) !important; }}
-/* Glide Data Grid scroller — match by class OR by inline overflow-y style */
+/* Use * to match every element inside stDataFrame regardless of inline style presence */
+[data-testid="stDataFrame"] *::-webkit-scrollbar {{ width: 14px !important; height: 14px !important; }}
+[data-testid="stDataFrame"] *::-webkit-scrollbar-track {{ background: rgba(255,255,255,0.12) !important; border-radius: 7px !important; }}
+[data-testid="stDataFrame"] *::-webkit-scrollbar-thumb {{ background: {BLUE} !important; border-radius: 7px !important; }}
+/* Per-axis min-size: vertical uses min-height, horizontal uses min-width */
+[data-testid="stDataFrame"] *::-webkit-scrollbar-thumb:vertical {{ min-height: 30px !important; }}
+[data-testid="stDataFrame"] *::-webkit-scrollbar-thumb:horizontal {{ min-width: 30px !important; }}
+[data-testid="stDataFrame"] *::-webkit-scrollbar-thumb:hover {{ background: #79b8ff !important; }}
+[data-testid="stDataFrame"] *::-webkit-scrollbar-corner {{ background: rgba(255,255,255,0.06) !important; }}
+/* Firefox */
+[data-testid="stDataFrame"] * {{ scrollbar-color: {BLUE} rgba(255,255,255,0.12) !important; scrollbar-width: auto !important; }}
+/* Force horizontal scroll on GDG's scroll container */
 [data-testid="stDataFrame"] .dvn-scroller,
 [data-testid="stDataFrame"] [style*="overflow-y: scroll"],
 [data-testid="stDataFrame"] [style*="overflow-y:scroll"],
@@ -458,7 +461,9 @@ _SCROLLBAR_JS = """<script>
   s.textContent=[
     '.vcp-s::-webkit-scrollbar{height:14px!important;width:14px!important}',
     '.vcp-s::-webkit-scrollbar-track{background:rgba(255,255,255,.18)!important;border-radius:7px!important}',
-    '.vcp-s::-webkit-scrollbar-thumb{background:#58a6ff!important;border-radius:7px!important;min-width:40px!important;min-height:40px!important}',
+    '.vcp-s::-webkit-scrollbar-thumb{background:#58a6ff!important;border-radius:7px!important}',
+    '.vcp-s::-webkit-scrollbar-thumb:vertical{min-height:30px!important}',
+    '.vcp-s::-webkit-scrollbar-thumb:horizontal{min-width:30px!important}',
     '.vcp-s::-webkit-scrollbar-thumb:hover{background:#79b8ff!important}'
   ].join('');
   document.head.appendChild(s);

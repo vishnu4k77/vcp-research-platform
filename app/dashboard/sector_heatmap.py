@@ -474,7 +474,7 @@ def _render_sector_drilldown(
         "Score":     st.column_config.NumberColumn(format="%.1f", width=140),
         "Dist 52w%": st.column_config.NumberColumn(format="%.1f%%", width=190),
     }
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=420, column_config=_drill_col_cfg)
+    st.dataframe(styled, use_container_width=True, hide_index=True, height=320, column_config=_drill_col_cfg)
     st.caption("Open the Stock Detail tab and enter a symbol to view its full price chart.")
 
 

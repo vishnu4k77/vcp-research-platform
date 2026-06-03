@@ -17,7 +17,7 @@ import streamlit as st
 from app.config.strategy_config import DashboardConfig, FundamentalsConfig, StrategyConfig
 from app.services.scanner_service import ScannerService
 from app.dashboard.styles import GREEN, RED, ORANGE, BLUE, TEXT_MUTED, section_title
-from app.dashboard.scanner_filters import render_filter_bar
+import app.dashboard.scanner_filters as _scanner_filters
 
 
 # ── Calendar enhancements (JS template — min_date injected at render time) ────
@@ -160,6 +160,35 @@ def _load_last_signal_date() -> Optional[date]:
 
 
 @st.cache_data(ttl=DashboardConfig.CACHE_TTL_SECONDS)
+def _load_environment_for_date(trade_date: date) -> dict:
+    """Cached market_environment row for the selected date.
+
+    Returns empty dict when no row exists (holiday, pre-pipeline run).
+    """
+    return ScannerService.get_environment_for_date(trade_date)
+
+
+@st.cache_data(ttl=DashboardConfig.CACHE_TTL_SECONDS)
+def _load_last_signal_date_before(trade_date: date) -> Optional[date]:
+    """Cached last active signal date on or before trade_date.
+
+    Used for the bear watchlist so historical bear periods resolve the correct
+    signal snapshot — not the global most-recent active date.
+    """
+    return ScannerService.get_last_signal_date(before_date=trade_date)
+
+
+@st.cache_data(ttl=DashboardConfig.CACHE_TTL_SECONDS)
+def _load_bear_watchlist(last_active_date: date, current_date: date) -> pd.DataFrame:
+    """Cached bear-mode setup health for (last_active_date, current_date) pair.
+
+    Both dates are cache-key components so the result refreshes automatically
+    when either date changes — no manual invalidation needed.
+    """
+    return ScannerService.get_bear_mode_watchlist(last_active_date, current_date)
+
+
+@st.cache_data(ttl=DashboardConfig.CACHE_TTL_SECONDS)
 def _load_scanner_presets() -> dict[str, dict[str, int]]:
     """Cached scanner presets loaded from SQL (falls back to Python config).
 
@@ -254,6 +283,7 @@ _SIGNAL_COLUMNS = [
     "liquidity_signal",
     "quality_signal",
     "rs_signal",
+    "pa_signal",       # price action — populated by run_pa_pipeline.py
 ]
 
 _DISPLAY_NAMES: dict[str, str] = {
@@ -283,6 +313,10 @@ _DISPLAY_NAMES: dict[str, str] = {
     "risk_reward_t2":              "R:R",
     "upside_prob_pct":             "Est Prob%",
     "ev_score":                    "EV%",
+    "pa_signal":                   "PA",
+    "pa_daily_trend":              "PA Daily",
+    "pa_weekly_trend":             "PA Weekly",
+    "pa_score":                    "PA Score",
     "fund_quality_score":          "Fund Score",
     "fund_promoter_pct":           "Promoter%",
     "fund_roe":                    "ROE%",
@@ -405,6 +439,139 @@ def _style_ev(val) -> str:
         return f"color: {RED}"
     except (TypeError, ValueError):
         return f"color: {TEXT_MUTED}"
+
+
+# ── Regime badge ─────────────────────────────────────────────────────────────
+
+_REGIME_COLORS: dict[str, str] = {
+    "STRONG_BULL": GREEN,
+    "BULL":        GREEN,
+    "CORRECTION":  ORANGE,
+    "NEUTRAL":     ORANGE,
+    "DEFENSIVE":   ORANGE,
+    "BEAR":        RED,
+}
+
+
+def _regime_badge(market_state: str) -> str:
+    """Return a coloured HTML badge chip for the given market state.
+
+    Returns empty string when market_state is blank (no data for that date)
+    so the header renders cleanly without a broken badge.
+
+    Args:
+        market_state: State code from market_environment (e.g. 'BULL', 'BEAR').
+
+    Returns:
+        HTML span string, or '' if market_state is empty.
+    """
+    if not market_state:
+        return ""
+    color = _REGIME_COLORS.get(market_state.upper(), TEXT_MUTED)
+    return (
+        f"<span style='background:{color}20;color:{color};"
+        f"border:1px solid {color}40;border-radius:5px;"
+        f"padding:2px 10px;font-size:11px;font-weight:600;"
+        f"font-family:Inter,sans-serif;margin-left:10px'>{market_state}</span>"
+    )
+
+
+# ── Bear-mode setup health panel ──────────────────────────────────────────────
+
+_WATCHLIST_COL_NAMES: dict[str, str] = {
+    "symbol":                "Symbol",
+    "company_name":          "Company",
+    "sector":                "Sector",
+    "composite_score":       "Score",
+    "stage2_days":           "S2 Age",
+    "dist_pivot_signal_day": "Entry Dist%",
+    "current_dist_pivot_pct":"Now Dist%",
+    "pivot_price":           "Pivot ₹",
+    "target_1_price":        "T1 ₹",
+    "target_2_price":        "T2 ₹",
+    "ev_score":              "EV%",
+}
+
+
+def _render_bear_watchlist(df: pd.DataFrame, signal_date: date) -> None:
+    """Render the bear-mode setup health panel below the bear mode banner.
+
+    Splits results into two groups:
+      - Holding  (is_holding=1): above EMA50 and within stop buffer of pivot.
+      - Breaking (is_holding=0): broke EMA50 or dropped past the stop level.
+
+    Args:
+        df: DataFrame from ScannerService.get_bear_mode_watchlist().
+        signal_date: The last active signal date (used in the section label).
+    """
+    if df.empty:
+        st.caption(f"No qualifying setups found from {signal_date}.")
+        return
+
+    holding  = df[df["is_holding"] == 1].copy()
+    breaking = df[df["is_holding"] == 0].copy()
+
+    st.markdown(
+        f"**Setup Health** — {len(df)} stocks were valid on **{signal_date}** "
+        f"· **{len(holding)}** holding · **{len(breaking)}** breaking down",
+    )
+
+    display_cols = [c for c in _WATCHLIST_COL_NAMES if c in df.columns]
+    fmt_map = {
+        "Score":       "{:.1f}",
+        "S2 Age":      "{:.0f}",
+        "Entry Dist%": "{:.1f}%",
+        "Now Dist%":   "{:.1f}%",
+        "Pivot ₹":     "{:.1f}",
+        "T1 ₹":        "{:.1f}",
+        "T2 ₹":        "{:.1f}",
+        "EV%":         "{:.1f}%",
+    }
+
+    # "large"/"medium" string widths (same pattern as backtest tab) guarantee
+    # total > container width → real draggable horizontal thumb appears.
+    _wl_col_cfg = {
+        "#":           st.column_config.NumberColumn(format="%d",     width="small"),
+        "Symbol":      st.column_config.TextColumn(width="medium"),
+        "Company":     st.column_config.TextColumn(width="large"),
+        "Sector":      st.column_config.TextColumn(width="medium"),
+        "Score":       st.column_config.NumberColumn(format="%.1f",   width="small"),
+        "S2 Age":      st.column_config.NumberColumn(format="%d",     width="small"),
+        "Entry Dist%": st.column_config.NumberColumn(format="%.1f%%", width="medium"),
+        "Now Dist%":   st.column_config.NumberColumn(format="%.1f%%", width="medium"),
+        "Pivot ₹":     st.column_config.NumberColumn(format="%.1f",   width="medium"),
+        "T1 ₹":        st.column_config.NumberColumn(format="%.1f",   width="medium"),
+        "T2 ₹":        st.column_config.NumberColumn(format="%.1f",   width="medium"),
+        "EV%":         st.column_config.NumberColumn(format="%.1f%%", width="small"),
+    }
+
+    for label, subset, color in (
+        ("Holding — potential recovery candidates", holding,  GREEN),
+        ("Breaking down — avoid",                  breaking, RED),
+    ):
+        if subset.empty:
+            continue
+        st.markdown(
+            f"<span style='color:{color};font-weight:600'>{label} "
+            f"({len(subset)})</span>",
+            unsafe_allow_html=True,
+        )
+        sub = subset[display_cols].rename(columns=_WATCHLIST_COL_NAMES).copy()
+
+        # Sort by EV% descending so highest expected-value setups are row #1
+        if "ev_score" in subset.columns:
+            sub = sub.sort_values("EV%", ascending=False, na_position="last")
+        sub = sub.reset_index(drop=True)
+        sub.insert(0, "#", range(1, len(sub) + 1))
+
+        styled = sub.style.format(fmt_map, na_rep="—")
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            hide_index=True,
+            height=min(400, 38 + len(sub) * 35),
+            column_config=_wl_col_cfg,
+        )
 
 
 # ── Main render ───────────────────────────────────────────────────────────────
@@ -537,6 +704,10 @@ def render_scanner_table() -> None:
             f"showing nearest trading day: **{selected_date.strftime('%a, %d %b %Y')}**."
         )
 
+    # ── Regime for selected date (badge shown next to header) ────────────────
+    env          = _load_environment_for_date(selected_date)
+    market_state = env.get("market_state", "")
+
     # ── Load full universe for this date ─────────────────────────────────────
     df_raw = _load_scanner(selected_date, selected_index_code)
 
@@ -548,7 +719,7 @@ def render_scanner_table() -> None:
         )
         return
 
-    # ── Bear / cash-mode banner (shown BEFORE the table, not after) ───────────
+    # ── Bear / cash-mode banner + setup health watchlist ─────────────────────
     _directional_cols = ("trend_signal", "stage2_signal", "vcp_signal", "breakout_signal")
     bear_mode = all(
         df_raw[col].sum() == 0
@@ -569,6 +740,12 @@ def render_scanner_table() -> None:
             f"by the regime gate (trend, stage2, VCP, breakout = 0 for all {len(df_raw)} stocks). "
             f"Liquidity, Quality and RS signals are still active.{suggestion}"
         )
+        # Use date-relative lookup so historical bear periods get the correct
+        # signal snapshot (not the global most-recent active date).
+        last_active_before = _load_last_signal_date_before(selected_date)
+        if last_active_before and last_active_before != selected_date:
+            wl = _load_bear_watchlist(last_active_before, selected_date)
+            _render_bear_watchlist(wl, last_active_before)
 
     # ── Apply preset scoring to full universe, then clip to display TOP N ────
     preset_weights    = scanner_presets.get(selected_preset, {})
@@ -602,7 +779,9 @@ def render_scanner_table() -> None:
         if not is_default_preset else ""
     )
     st.markdown(
-        section_title(f"Scanner — {selected_date}") + preset_badge,
+        section_title(f"Scanner — {selected_date}")
+        + _regime_badge(market_state)
+        + preset_badge,
         unsafe_allow_html=True,
     )
 
@@ -612,6 +791,13 @@ def render_scanner_table() -> None:
     m3.metric("VCP setups",    int(df["vcp_signal"].sum())      if "vcp_signal"      in df.columns else "—")
     m4.metric("Breakouts",     int(df["breakout_signal"].sum()) if "breakout_signal" in df.columns else "—")
     m5.metric("BO Ready",      int(df["breakout_ready_signal"].sum()) if "breakout_ready_signal" in df.columns else "—")
+
+    if bear_mode:
+        st.caption(
+            "BEAR mode: trend, Stage2, VCP and breakout are all 0. "
+            "Scores below reflect Liquidity + Quality only (max ~30). "
+            "Use the Setup Health watchlist above for actionable setups."
+        )
 
     # Show active preset weights when non-default preset is selected
     if not is_default_preset:
@@ -639,7 +825,7 @@ def render_scanner_table() -> None:
     # ── Smart Filter bar ──────────────────────────────────────────────────────
     # Applied to the display DataFrame (after column rename) so filter labels
     # match exactly what the user sees in the table.
-    display = render_filter_bar(display)
+    display = _scanner_filters.render_filter_bar(display)
 
     if display.empty:
         if bear_mode:
@@ -710,28 +896,30 @@ def render_scanner_table() -> None:
 
     # Only set explicit widths for non-boolean columns.
     # Signal/IC columns are left out so Streamlit auto-detects them as booleans → checkboxes.
+    # Fixed widths force the total to exceed the container, giving a clean
+    # internal horizontal scrollbar — the same pattern as the backtest tab.
     _col_cfg: dict = {
-        "#":           st.column_config.NumberColumn(format="%d", width=45),
-        "Symbol":      st.column_config.TextColumn(width=110),
-        "Company":     st.column_config.TextColumn(width=170),
-        "Sector":      st.column_config.TextColumn(width=155),
-        "Score":       st.column_config.NumberColumn(format="%.1f", width=65),
-        "S2 Age(d)":   st.column_config.NumberColumn(format="%d", width=78),
-        "Dist Pivot%": st.column_config.NumberColumn(format="%.1f%%", width=95),
-        "Dist 52w%":   st.column_config.NumberColumn(format="%.1f%%", width=90),
-        "Pivot ₹":     st.column_config.NumberColumn(format="%.1f",   width=82),
-        "Base %":      st.column_config.NumberColumn(format="%.1f%%", width=72),
-        "T1 ₹":        st.column_config.NumberColumn(format="%.1f",   width=82),
-        "T1 %":        st.column_config.NumberColumn(format="%.1f%%", width=65),
-        "T2 ₹":        st.column_config.NumberColumn(format="%.1f",   width=82),
-        "T2 %":        st.column_config.NumberColumn(format="%.1f%%", width=65),
-        "R:R":         st.column_config.NumberColumn(format="%.2f",   width=60),
-        "Est Prob%":   st.column_config.NumberColumn(format="%.1f%%", width=85),
-        "EV%":         st.column_config.NumberColumn(format="%.1f%%", width=72),
-        "Fund Score":  st.column_config.NumberColumn(format="%.1f", width=85),
-        "Promoter%":   st.column_config.NumberColumn(format="%.1f%%", width=88),
-        "ROE%":        st.column_config.NumberColumn(format="%.1f%%", width=65),
-        "ROCE%":       st.column_config.NumberColumn(format="%.1f%%", width=70),
+        "#":           st.column_config.NumberColumn(format="%d",      width=42),
+        "Symbol":      st.column_config.TextColumn(width=115),
+        "Company":     st.column_config.TextColumn(width=175),
+        "Sector":      st.column_config.TextColumn(width=140),
+        "Score":       st.column_config.NumberColumn(format="%.1f",    width=62),
+        "S2 Age(d)":   st.column_config.NumberColumn(format="%d",      width=72),
+        "Dist Pivot%": st.column_config.NumberColumn(format="%.1f%%",  width=92),
+        "Dist 52w%":   st.column_config.NumberColumn(format="%.1f%%",  width=85),
+        "Pivot ₹":     st.column_config.NumberColumn(format="%.1f",    width=78),
+        "Base %":      st.column_config.NumberColumn(format="%.1f%%",  width=68),
+        "T1 ₹":        st.column_config.NumberColumn(format="%.1f",    width=78),
+        "T1 %":        st.column_config.NumberColumn(format="%.1f%%",  width=62),
+        "T2 ₹":        st.column_config.NumberColumn(format="%.1f",    width=78),
+        "T2 %":        st.column_config.NumberColumn(format="%.1f%%",  width=62),
+        "R:R":         st.column_config.NumberColumn(format="%.2f",    width=58),
+        "Est Prob%":   st.column_config.NumberColumn(format="%.1f%%",  width=82),
+        "EV%":         st.column_config.NumberColumn(format="%.1f%%",  width=68),
+        "Fund Score":  st.column_config.NumberColumn(format="%.1f",    width=82),
+        "Promoter%":   st.column_config.NumberColumn(format="%.1f%%",  width=88),
+        "ROE%":        st.column_config.NumberColumn(format="%.1f%%",  width=65),
+        "ROCE%":       st.column_config.NumberColumn(format="%.1f%%",  width=68),
     }
     st.dataframe(styled, use_container_width=True, hide_index=True, height=600, column_config=_col_cfg)
 
