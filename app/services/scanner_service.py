@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 from app.config.db import engine, nolock_connect
 from app.config.logging_config import get_logger
-from app.config.strategy_config import DashboardConfig, StrategyConfig
+from app.config.strategy_config import BacktestConfig, DashboardConfig, StrategyConfig
 
 logger = get_logger(__name__)
 
@@ -319,7 +319,12 @@ class ScannerService:
                 sf.quality_score        AS fund_quality_score,
                 sf.promoter_holding     AS fund_promoter_pct,
                 sf.roe                  AS fund_roe,
-                sf.roce                 AS fund_roce
+                sf.roce                 AS fund_roce,
+                -- PA signals (0 when run_pa_pipeline.py has not yet run for this date)
+                ISNULL(pas.pa_signal,         0)   AS pa_signal,
+                ISNULL(pas.pa_hh_daily,       0)   AS pa_daily_trend,
+                ISNULL(pas.pa_hh_weekly,      0)   AS pa_weekly_trend,
+                ISNULL(pas.pa_score,          0.0) AS pa_score
             FROM stock_signals ss
             LEFT JOIN nse_universe nu
                 ON nu.symbol = REPLACE(ss.symbol, :nse_suffix, '')
@@ -328,6 +333,9 @@ class ScannerService:
                        ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn
                 FROM stock_fundamentals
             ) sf ON sf.symbol = REPLACE(ss.symbol, :nse_suffix, '') AND sf.rn = 1
+            LEFT JOIN stock_pa_signals pas
+                ON  pas.symbol     = ss.symbol
+                AND pas.trade_date = ss.trade_date
             {index_join}
             WHERE ss.trade_date    = :trade_date
               AND ss.composite_score >= :min_score
@@ -360,26 +368,54 @@ class ScannerService:
             return pd.DataFrame()
 
     @staticmethod
-    def get_last_signal_date() -> Optional[date]:
-        """Return the most recent trade_date that has at least one active directional signal.
+    def get_last_signal_date(
+        before_date: Optional[date] = None,
+    ) -> Optional[date]:
+        """Return the most recent non-bear trading date from market_environment.
 
-        Used by the scanner to suggest a useful date when the latest date is in
-        BEAR / cash_mode (all directional signals suppressed).
+        Uses market_environment.cash_mode as the authoritative regime source.
+        stock_signals is NOT used here because the pipeline truncates and
+        recomputes that table on every run — the regime gate only applies to
+        the latest date, so historical bear days regain trend_signal=1 after
+        the next run.  market_environment is written once per day and never
+        rewritten, making it the correct source for historical regime state.
 
-        Directional signals checked: trend_signal, stage2_signal, vcp_signal, breakout_signal.
+        When before_date is supplied the result is capped to strictly before
+        that date (< not <=) so a bear day never returns itself.
+
+        Examples:
+            get_last_signal_date()                 → global most recent non-bear date
+            get_last_signal_date(date(2026, 6, 2)) → last non-bear date before 2026-06-02
+
+        Args:
+            before_date: Optional ceiling. When None returns the global most recent
+                         non-bear date. When supplied returns the most recent
+                         non-bear date strictly before before_date.
 
         Returns:
-            Most recent date with trend_signal > 0, or None if none found.
+            Most recent trade_date with cash_mode=0, or None if not found.
         """
-        query = text("""
-            SELECT TOP 1 trade_date
-            FROM stock_signals
-            WHERE trend_signal = 1
-            ORDER BY trade_date DESC
-        """)
+        if before_date is not None:
+            query = text("""
+                SELECT TOP 1 trade_date
+                FROM market_environment
+                WHERE cash_mode  = 0
+                  AND trade_date < :before_date
+                ORDER BY trade_date DESC
+            """)
+            params: dict = {"before_date": before_date}
+        else:
+            query = text("""
+                SELECT TOP 1 trade_date
+                FROM market_environment
+                WHERE cash_mode = 0
+                ORDER BY trade_date DESC
+            """)
+            params = {}
+
         try:
             with nolock_connect() as conn:
-                row = conn.execute(query).fetchone()
+                row = conn.execute(query, params).fetchone()
             return row[0] if row else None
         except Exception as exc:
             logger.error("get_last_signal_date failed: %s", exc, exc_info=True)
@@ -843,6 +879,142 @@ class ScannerService:
         except Exception as exc:
             logger.error("get_symbol_display_options failed: %s", exc, exc_info=True)
             return []
+
+    # ── Regime + bear watchlist ───────────────────────────────────────────────
+
+    @staticmethod
+    def get_environment_for_date(trade_date: date) -> dict:
+        """Return the market_environment row for a specific trade_date.
+
+        Used by the scanner to show a regime badge (BULL / NEUTRAL / BEAR)
+        next to the date header for any date the user picks — not just the
+        latest day.
+
+        Args:
+            trade_date: The date to query.
+
+        Returns:
+            Dict with market_state, regime_score, allow_breakouts, cash_mode.
+            Empty dict when no row exists for that date (holiday, pre-pipeline).
+        """
+        query = text("""
+            SELECT TOP 1
+                market_state, regime_score, allow_breakouts, cash_mode
+            FROM market_environment
+            WHERE trade_date = :trade_date
+        """)
+        try:
+            with nolock_connect() as conn:
+                row = conn.execute(query, {"trade_date": trade_date}).fetchone()
+            if row is None:
+                return {}
+            return {
+                "market_state":    row[0],
+                "regime_score":    float(row[1]) if row[1] is not None else None,
+                "allow_breakouts": bool(row[2]),
+                "cash_mode":       bool(row[3]),
+            }
+        except Exception as exc:
+            logger.error("get_environment_for_date failed: %s", exc, exc_info=True)
+            return {}
+
+    @staticmethod
+    def get_bear_mode_watchlist(
+        last_active_date: date,
+        current_date: date,
+        min_score: float = DashboardConfig.BEAR_WATCHLIST_MIN_SCORE,
+        stop_loss_pct: float = BacktestConfig.STOP_LOSS_PCT,
+    ) -> pd.DataFrame:
+        """Return setup health for stocks valid on the last active signal day.
+
+        Joins stock_signals at last_active_date (setup snapshot — single point
+        lookup) with stock_features at current_date (today's live price — single
+        point lookup).  Both joins are on indexed (trade_date, symbol) pairs so
+        the query stays O(symbols) even with 5 000+ stocks.
+
+        is_holding = 1 when:
+            current_close >= pivot_price * (1 - stop_loss_pct)   [not stopped out]
+            AND current_close >= ema_50                            [still in uptrend]
+
+        is_holding = 0 means the setup has broken down — price fell through
+        EMA50 or dropped more than stop_loss_pct below the pivot.
+
+        Args:
+            last_active_date: Most recent date with active directional signals
+                              (from get_last_signal_date()).
+            current_date:     Date the user is viewing in bear mode.  stock_features
+                              must have a row for this date (pipeline must have run).
+            min_score:        Minimum composite_score from last_active_date.
+                              Defaults to DashboardConfig.BEAR_WATCHLIST_MIN_SCORE.
+            stop_loss_pct:    Stop buffer below pivot.  Mirrors BacktestConfig so
+                              the health threshold stays consistent with backtest exits.
+
+        Returns:
+            DataFrame with symbol, company_name, sector, setup metrics, current
+            price, is_holding flag, current_dist_pivot_pct.  Ordered holding first,
+            then closest-to-pivot first within each group.  Empty on error.
+        """
+        query = text("""
+            SELECT
+                ss.symbol,
+                ISNULL(nu.company_name, ss.symbol)  AS company_name,
+                ISNULL(nu.sector, 'Unknown')         AS sector,
+                ss.composite_score,
+                ss.stage2_days,
+                ss.pivot_price,
+                ss.distance_from_pivot_pct           AS dist_pivot_signal_day,
+                ss.target_1_price,
+                ss.target_2_price,
+                ss.ev_score,
+                sf.close_price                       AS current_close,
+                sf.ema_50                            AS current_ema50,
+                CASE
+                    WHEN sf.close_price >= ss.pivot_price * (1.0 - :stop_loss_pct)
+                     AND sf.close_price >= sf.ema_50
+                    THEN 1 ELSE 0
+                END                                  AS is_holding,
+                ROUND(
+                    (sf.close_price - ss.pivot_price)
+                    / NULLIF(ss.pivot_price, 0) * 100,
+                    1
+                )                                    AS current_dist_pivot_pct
+            FROM stock_signals ss
+            INNER JOIN stock_features sf
+                ON  sf.symbol     = ss.symbol
+                AND sf.trade_date = :current_date
+            LEFT JOIN nse_universe nu
+                ON nu.symbol = REPLACE(ss.symbol, :nse_suffix, '')
+            WHERE ss.trade_date       = :last_active_date
+              AND ss.stage2_signal    = 1
+              AND ss.trend_signal     = 1
+              AND ss.rs_signal        = 1
+              AND ss.liquidity_signal = 1
+              AND ss.quality_signal   = 1
+              AND ss.composite_score >= :min_score
+            ORDER BY
+                is_holding             DESC,
+                current_dist_pivot_pct DESC
+        """)
+        try:
+            with nolock_connect() as conn:
+                df = pd.read_sql(query, conn, params={
+                    "last_active_date": last_active_date,
+                    "current_date":     current_date,
+                    "min_score":        min_score,
+                    "stop_loss_pct":    stop_loss_pct,
+                    "nse_suffix":       StrategyConfig.YAHOO_NSE_SUFFIX,
+                })
+            logger.debug(
+                "bear_watchlist: %d stocks | signal_date=%s | price_date=%s | holding=%d",
+                len(df),
+                last_active_date,
+                current_date,
+                int(df["is_holding"].sum()) if not df.empty else 0,
+            )
+            return df
+        except Exception as exc:
+            logger.error("get_bear_mode_watchlist failed: %s", exc, exc_info=True)
+            return pd.DataFrame()
 
     # ── Saved queries ─────────────────────────────────────────────────────────
 

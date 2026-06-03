@@ -117,9 +117,9 @@ _FIELD_CHIPS = [
     "ROE%", "ROCE%", "Promoter%",
 ]
 
-# Pre-rendered watermark HTML (shown when query is empty)
+# Pre-rendered watermark HTML (shown when query box is empty — matches placeholder exactly)
 _WATERMARK_HTML = (
-    f'e.g.&nbsp;&nbsp;'
+    f'<span style="opacity:0.5;font-size:11px;letter-spacing:0.05em">TYPE A QUERY ABOVE &mdash; e.g.</span>&nbsp;&nbsp;'
     f'<span style="color:{_C_KW};font-weight:700">WHERE</span> '
     f'<span style="color:{_C_FIELD};font-weight:600">Stage2</span>'
     f'<span style="color:{_C_OP};font-weight:600"> = </span>'
@@ -127,11 +127,7 @@ _WATERMARK_HTML = (
     f'<span style="color:{_C_KW};font-weight:700">AND</span> '
     f'<span style="color:{_C_FIELD};font-weight:600">&quot;S2 Age(d)&quot;</span>'
     f'<span style="color:{_C_OP};font-weight:600"> &lt;= </span>'
-    f'<span style="color:{_C_VAL};font-weight:600">5</span> '
-    f'<span style="color:{_C_KW};font-weight:700">AND</span> '
-    f'<span style="color:{_C_FIELD};font-weight:600">ROE%</span>'
-    f'<span style="color:{_C_OP};font-weight:600"> &gt;= </span>'
-    f'<span style="color:{_C_VAL};font-weight:600">15</span>'
+    f'<span style="color:{_C_VAL};font-weight:600">5</span>'
     f'&nbsp;&nbsp;'
     f'<span style="color:{_C_KW};font-weight:700">ORDER BY</span> '
     f'<span style="color:{_C_FIELD};font-weight:600">Score</span> '
@@ -806,10 +802,43 @@ def render_filter_bar(df: pd.DataFrame) -> pd.DataFrame:
     result = _apply_filters(df, conditions)
 
     # ── Apply sort ────────────────────────────────────────────────────────────
+    # Two-tier EV%-primary sort:
+    #
+    #   Tier 1 (Score >= 50): sorted by EV% DESC → highest expected profit first.
+    #   Tier 2 (Score <  50): sorted by Score DESC → quality order at the bottom.
+    #
+    # Why two tiers instead of pure EV%:
+    #   Low-score stocks (Score=0-30) often have inflated EV% from large base
+    #   ranges or unusual target calculations — they are NOT real trading
+    #   opportunities.  The quality threshold (50) keeps them from polluting the
+    #   top.  In practice, the scanner's top-100 are all Score>=50, so Tier 1
+    #   covers every visible row and the ranking is simply EV% descending.
+    #
+    # User's ORDER BY field is the secondary tiebreaker within each tier.
     sort_col = _FIELDS.get(sort_field, {}).get("col", sort_field)
     if sort_col in result.columns:
-        result = result.sort_values(
-            sort_col, ascending=sort_asc, na_position="last",
-        ).reset_index(drop=True)
+        ev_col  = "EV%"
+        _EV_QUALITY_THRESHOLD = 50.0
+
+        if ev_col in result.columns and sort_col != ev_col:
+            import pandas as _pd
+            scores = _pd.to_numeric(result[sort_col], errors="coerce").fillna(0)
+            tier1  = result[scores >= _EV_QUALITY_THRESHOLD].sort_values(
+                [ev_col, sort_col], ascending=[False, sort_asc], na_position="last"
+            )
+            tier2  = result[scores < _EV_QUALITY_THRESHOLD].sort_values(
+                [sort_col, ev_col], ascending=[sort_asc, False], na_position="last"
+            )
+            # EV% for Score<50 stocks is inflated by large base ranges on broken stocks
+            # (e.g., T2%=327% for a stock -61% below pivot → EV%=126%).
+            # Blanking it prevents Streamlit's click-to-sort from bringing these
+            # stocks to the top when the user clicks the EV% column header.
+            tier2 = tier2.copy()
+            tier2[ev_col] = None
+            result = _pd.concat([tier1, tier2]).reset_index(drop=True)
+        else:
+            result = result.sort_values(
+                sort_col, ascending=sort_asc, na_position="last",
+            ).reset_index(drop=True)
 
     return result

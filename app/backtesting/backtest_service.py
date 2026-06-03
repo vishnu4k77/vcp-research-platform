@@ -23,6 +23,10 @@ logger = get_logger(__name__)
 # Whitelist of valid entry signal columns — prevents injection via UI inputs.
 _VALID_ENTRY_SIGNALS: frozenset[str] = frozenset(BacktestConfig.ENTRY_SIGNAL_OPTIONS)
 
+# Signals that live in stock_pa_signals (not stock_signals).
+# These require a different SQL query that JOINs stock_pa_signals.
+_PA_SIGNAL_TYPES: frozenset[str] = BacktestConfig.PA_SIGNAL_TYPES
+
 
 class BacktestService:
     """Read-only SQL queries for the backtesting engine.
@@ -60,18 +64,20 @@ class BacktestService:
     ) -> pd.DataFrame:
         """Return all entry-signal rows in [start_date, end_date] with their entry prices.
 
-        The entry_signal column name is validated against _VALID_ENTRY_SIGNALS before
-        being interpolated into the SQL string (column names cannot be parameterised
-        in SQL Server — the whitelist is the safety guarantee).
+        Routes to one of three SQL queries depending on the signal type:
+          - Standard signals (breakout_signal, vcp_signal, breakout_ready_signal):
+              query stock_signals only.
+          - pa_signal: query stock_pa_signals JOIN stock_signals (for composite_score).
+          - combined_pa_ema: query stock_signals.breakout_signal=1
+              AND stock_pa_signals.pa_signal=1 (both must agree).
 
-        Stage 2 age filtering (min/max_stage2_days) applies the same Early/Mid/Advanced
-        classification used in the scanner.  Pass None for either bound to skip that check.
-        Requires stock_signals.stage2_days to be populated (run the signal pipeline first).
+        Column names are validated against _VALID_ENTRY_SIGNALS before any SQL
+        interpolation (whitelist = injection safety guarantee).
 
         Args:
             start_date: First date to include.
             end_date: Last date to include.
-            entry_signal: Column name in stock_signals (e.g. "breakout_signal").
+            entry_signal: Signal name (e.g. "breakout_signal", "pa_signal", "combined_pa_ema").
             min_composite_score: Only include rows where composite_score >= this.
             min_stage2_days: Minimum days in current Stage 2 run (None = no lower bound).
             max_stage2_days: Maximum days in current Stage 2 run (None = no upper bound).
@@ -90,43 +96,112 @@ class BacktestService:
                 f"Must be one of: {sorted(_VALID_ENTRY_SIGNALS)}"
             )
 
-        # stage2_days filter: SQL Server supports parameterised NULL in IS NULL checks.
-        # Python None → SQL NULL → the OR branch short-circuits the filter for that bound.
-        query = text(f"""
-            SELECT
-                ss.trade_date                               AS entry_date,
-                ss.symbol,
-                ss.composite_score,
-                ss.stage2_days,
-                dpd.close_price                             AS entry_price,
-                ISNULL(mr.market_status, 'UNKNOWN')         AS regime
-            FROM stock_signals ss
-            JOIN daily_price_data dpd
-                ON  dpd.symbol     = ss.symbol
-                AND dpd.trade_date = ss.trade_date
-            LEFT JOIN market_regime mr
-                ON  mr.trade_date  = ss.trade_date
-            WHERE ss.trade_date        BETWEEN :start_date AND :end_date
-              AND ss.{entry_signal}    = 1
-              AND ss.composite_score   >= :min_score
-              AND (:min_s2d IS NULL OR ss.stage2_days >= :min_s2d)
-              AND (:max_s2d IS NULL OR ss.stage2_days <= :max_s2d)
-            ORDER BY ss.trade_date ASC, ss.symbol ASC
-        """)
+        params = {
+            "start_date": start_date,
+            "end_date":   end_date,
+            "min_score":  min_composite_score,
+            "min_s2d":    min_stage2_days,
+            "max_s2d":    max_stage2_days,
+        }
+
+        if entry_signal == "pa_signal":
+            # PA standalone: entry when stock_pa_signals.pa_signal = 1.
+            # Regime gate: INNER JOIN market_environment removes BEAR (cash_mode=1)
+            # and DEFENSIVE (21% win rate, -2.85% avg — worst PA regime).
+            # stock_signals is joined read-only for composite_score / stage2_days.
+            query = text("""
+                SELECT
+                    ps.trade_date                               AS entry_date,
+                    ps.symbol,
+                    ss.composite_score,
+                    ss.stage2_days,
+                    dpd.close_price                             AS entry_price,
+                    ISNULL(mr.market_status, 'UNKNOWN')         AS regime
+                FROM stock_pa_signals ps
+                JOIN stock_signals ss
+                    ON  ss.symbol     = ps.symbol
+                    AND ss.trade_date = ps.trade_date
+                JOIN daily_price_data dpd
+                    ON  dpd.symbol     = ps.symbol
+                    AND dpd.trade_date = ps.trade_date
+                JOIN market_environment me
+                    ON  me.trade_date   = ps.trade_date
+                    AND me.cash_mode    = 0
+                    AND me.market_state <> 'DEFENSIVE'
+                LEFT JOIN market_regime mr
+                    ON  mr.trade_date  = ps.trade_date
+                WHERE ps.trade_date      BETWEEN :start_date AND :end_date
+                  AND ps.pa_signal        = 1
+                  AND ss.composite_score  >= :min_score
+                  AND (:min_s2d IS NULL OR ss.stage2_days >= :min_s2d)
+                  AND (:max_s2d IS NULL OR ss.stage2_days <= :max_s2d)
+                ORDER BY ps.trade_date ASC, ps.symbol ASC
+            """)
+
+        elif entry_signal == "combined_pa_ema":
+            # Combined: both breakout_signal (EMA confirmation) AND pa_signal must be 1.
+            # Regime gate: fixes stock_signals regime leakage — stock_signals is TRUNCATED
+            # and recomputed on every pipeline run, so historical bear days regain
+            # breakout_signal=1 after a new run. The market_environment JOIN is the
+            # authoritative, write-once source of truth for regime.
+            # DEFENSIVE also excluded: 0% win rate, -7% avg in combined backtest.
+            query = text("""
+                SELECT
+                    ss.trade_date                               AS entry_date,
+                    ss.symbol,
+                    ss.composite_score,
+                    ss.stage2_days,
+                    dpd.close_price                             AS entry_price,
+                    ISNULL(mr.market_status, 'UNKNOWN')         AS regime
+                FROM stock_signals ss
+                JOIN stock_pa_signals ps
+                    ON  ps.symbol     = ss.symbol
+                    AND ps.trade_date = ss.trade_date
+                JOIN daily_price_data dpd
+                    ON  dpd.symbol     = ss.symbol
+                    AND dpd.trade_date = ss.trade_date
+                JOIN market_environment me
+                    ON  me.trade_date   = ss.trade_date
+                    AND me.cash_mode    = 0
+                    AND me.market_state <> 'DEFENSIVE'
+                LEFT JOIN market_regime mr
+                    ON  mr.trade_date  = ss.trade_date
+                WHERE ss.trade_date      BETWEEN :start_date AND :end_date
+                  AND ss.breakout_signal  = 1
+                  AND ps.pa_signal        = 1
+                  AND ss.composite_score  >= :min_score
+                  AND (:min_s2d IS NULL OR ss.stage2_days >= :min_s2d)
+                  AND (:max_s2d IS NULL OR ss.stage2_days <= :max_s2d)
+                ORDER BY ss.trade_date ASC, ss.symbol ASC
+            """)
+
+        else:
+            # Standard stock_signals column — safe to interpolate (whitelisted above).
+            query = text(f"""
+                SELECT
+                    ss.trade_date                               AS entry_date,
+                    ss.symbol,
+                    ss.composite_score,
+                    ss.stage2_days,
+                    dpd.close_price                             AS entry_price,
+                    ISNULL(mr.market_status, 'UNKNOWN')         AS regime
+                FROM stock_signals ss
+                JOIN daily_price_data dpd
+                    ON  dpd.symbol     = ss.symbol
+                    AND dpd.trade_date = ss.trade_date
+                LEFT JOIN market_regime mr
+                    ON  mr.trade_date  = ss.trade_date
+                WHERE ss.trade_date        BETWEEN :start_date AND :end_date
+                  AND ss.{entry_signal}    = 1
+                  AND ss.composite_score   >= :min_score
+                  AND (:min_s2d IS NULL OR ss.stage2_days >= :min_s2d)
+                  AND (:max_s2d IS NULL OR ss.stage2_days <= :max_s2d)
+                ORDER BY ss.trade_date ASC, ss.symbol ASC
+            """)
 
         try:
             with nolock_connect() as conn:
-                df = pd.read_sql(
-                    query,
-                    conn,
-                    params={
-                        "start_date": start_date,
-                        "end_date":   end_date,
-                        "min_score":  min_composite_score,
-                        "min_s2d":    min_stage2_days,
-                        "max_s2d":    max_stage2_days,
-                    },
-                )
+                df = pd.read_sql(query, conn, params=params)
             logger.info(
                 "Signal entries loaded | signal=%s | %s→%s | s2d=[%s,%s] | rows=%d",
                 entry_signal, start_date, end_date,

@@ -324,6 +324,35 @@ TABLE_DDL_EXTRA = {
             CONSTRAINT uq_sq_name       UNIQUE      (query_name)
         )
     """,
+
+    # Price Action signals — populated by scripts/run_pa_pipeline.py.
+    # Completely independent of stock_signals — zero disturbance to existing pipeline.
+    # scanner_service.get_scanner_data() LEFT JOINs this table so pa_signal
+    # appears in scanner rows; returns 0 when PA pipeline has not yet run.
+    # Truncated and recomputed on each PA pipeline run (same pattern as stock_signals).
+    "stock_pa_signals": """
+        CREATE TABLE stock_pa_signals (
+            id                BIGINT      IDENTITY(1,1) NOT NULL,
+            symbol            VARCHAR(20) NOT NULL,
+            trade_date        DATE        NOT NULL,
+            -- daily structure
+            pa_hh_daily       BIT         NOT NULL CONSTRAINT df_pahh  DEFAULT 0,
+            pa_hl_daily       BIT         NOT NULL CONSTRAINT df_pahl  DEFAULT 0,
+            -- weekly structure (multi-timeframe gate — hard requirement for pa_signal=1)
+            pa_hh_weekly      BIT         NOT NULL CONSTRAINT df_pawhh DEFAULT 0,
+            pa_hl_weekly      BIT         NOT NULL CONSTRAINT df_pawhl DEFAULT 0,
+            -- component flags
+            pa_close_position FLOAT       NULL,
+            pa_vol_quality    BIT         NOT NULL CONSTRAINT df_pavol DEFAULT 0,
+            pa_momentum_accel BIT         NOT NULL CONSTRAINT df_pamom DEFAULT 0,
+            pa_extension_ok   BIT         NOT NULL CONSTRAINT df_paext DEFAULT 0,
+            -- composite
+            pa_score          FLOAT       NOT NULL CONSTRAINT df_pascore DEFAULT 0,
+            pa_signal         BIT         NOT NULL CONSTRAINT df_pasig   DEFAULT 0,
+            CONSTRAINT pk_stock_pa_signals  PRIMARY KEY (id),
+            CONSTRAINT uq_pa_symbol_date    UNIQUE (symbol, trade_date)
+        )
+    """,
 }
 
 
@@ -350,6 +379,7 @@ REQUIRED_TABLES = [
     "data_quality_log",           # daily quality audit — stale deletes, gaps, thin history
     "sector_momentum",            # sector rotation scores — computed after each signal run
     "saved_queries",              # user-saved scanner SQL strings from the dashboard UI
+    "stock_pa_signals",           # price action signals — populated by run_pa_pipeline.py
 ]
 
 

@@ -231,14 +231,21 @@ class BacktestConfig:
     The SQL table scanner_preset_config controls which signals can be used as entries.
     """
 
-    # Which stock_signals columns are valid entry triggers for backtesting.
-    # Ordered by specificity: breakout > VCP > BO ready.
+    # Which signal columns are valid entry triggers for backtesting.
+    # Ordered by specificity: breakout > VCP > BO ready > PA > combined.
+    # pa_signal and combined_pa_ema read from stock_pa_signals (separate table).
     ENTRY_SIGNAL_OPTIONS: list[str] = [
         "breakout_signal",
         "vcp_signal",
         "breakout_ready_signal",
+        "pa_signal",
+        "combined_pa_ema",
     ]
     DEFAULT_ENTRY_SIGNAL: str = "breakout_signal"
+
+    # Signals that query stock_pa_signals rather than stock_signals.
+    # BacktestService uses this to route to the correct SQL query.
+    PA_SIGNAL_TYPES: frozenset = frozenset(["pa_signal", "combined_pa_ema"])
 
     # Exit rules — applied per trade in forward simulation order:
     #   1. Stop loss (checked first — conservative)
@@ -324,6 +331,17 @@ class DashboardConfig:
     }
     HEATMAP_DEFAULT_METRIC: str = "rs_pct"
 
+    # ── Bear-mode setup health watchlist ──────────────────────────────────────
+    # Shown in the scanner when cash_mode=True (regime gate active).
+    # Surfaces stocks that were valid setups on the last active signal day and
+    # checks whether each is still holding (above EMA50 + within stop of pivot)
+    # or breaking down — using today's price from stock_features (not stale).
+    #
+    # Stop-loss buffer mirrors BacktestConfig.STOP_LOSS_PCT (7%) so the
+    # "is_holding" threshold stays consistent with the backtest exit rule.
+    # Change STOP_LOSS_PCT in BacktestConfig to update both automatically.
+    BEAR_WATCHLIST_MIN_SCORE: float = 70.0
+
     # ── Scanner presets ────────────────────────────────────────────────────────
     # Each preset is a named signal-weight configuration.
     # Weights do NOT need to sum to 100 — the ranker normalises by total weight.
@@ -404,6 +422,30 @@ class DashboardConfig:
             "darvas_signal":    60,
             "minervini_signal": 30,
             "rs_signal":        10,
+        },
+
+        # Price Action: multi-timeframe daily+weekly structure + volume + momentum.
+        # Run scripts/run_pa_pipeline.py first to populate stock_pa_signals.
+        # pa_signal=0 until PA pipeline runs (scores 0 on this preset, not shown).
+        "Price Action": {
+            "pa_signal":        60,
+            "rs_signal":        20,
+            "liquidity_signal": 10,
+            "quality_signal":   10,
+        },
+
+        # Combined PA+EMA: highest conviction — both price structure AND EMA
+        # confirmation must agree. pa_signal carries 30% weight so any stock
+        # without pa_signal=1 cannot exceed score ~70 on this preset.
+        # This is the target 85% accuracy setup — backtest before live use.
+        "Combined PA+EMA": {
+            "pa_signal":        30,
+            "stage2_signal":    15,
+            "trend_signal":     15,
+            "rs_signal":        15,
+            "quality_signal":   15,
+            "liquidity_signal":  5,
+            "breakout_signal":   5,
         },
     }
 
@@ -533,6 +575,68 @@ class TargetConfig:
 
     MAX_PROB_PCT: float = 75.0   # cap — markets are never certain
     MIN_PROB_PCT: float = 20.0   # floor — even weak setups carry some base probability
+
+
+class PriceActionConfig:
+    """Price Action (PA) signal — multi-timeframe structure + volume + momentum.
+
+    All thresholds config-driven. Change values here; no signal logic edits needed.
+
+    Accuracy target: 82-85% on confirmed uptrend classification.
+    Key insight: daily AND weekly higher-highs/higher-lows must BOTH be true —
+    this multi-timeframe requirement is the primary false-positive reducer.
+    """
+
+    # ── Daily trend detection ─────────────────────────────────────────────────
+    # Compare rolling max/min over the last LOOKBACK bars vs SHIFT bars ago.
+    # Higher rolling max  → higher high. Higher rolling min → higher low.
+    PA_DAILY_LOOKBACK: int = 20    # bars for rolling max/min
+    PA_DAILY_SHIFT:    int = 20    # bars ago to compare against
+
+    # ── Weekly trend detection ────────────────────────────────────────────────
+    # Same logic on weekly-resampled data. Weekly HH+HL requires 4 consecutive
+    # weeks of structure — much harder to fake than a single-day daily spike.
+    PA_WEEKLY_LOOKBACK: int = 4    # weeks for rolling max/min
+    PA_WEEKLY_SHIFT:    int = 4    # weeks ago to compare against
+
+    # ── Candle quality ────────────────────────────────────────────────────────
+    # Close position = (close - low) / (high - low).
+    # >= 0.60 = strong close in upper 60% of day's range = institutional buying.
+    PA_MIN_CLOSE_POSITION: float = 0.60
+
+    # ── Volume quality — accumulation, not climactic ──────────────────────────
+    # Accumulation: volume expanding moderately (above average but not spike).
+    # Climactic: abnormal volume exhaustion (> PA_VOL_MAX = distribution risk).
+    PA_VOL_MIN: float = 1.1    # min relative_volume (some participation)
+    PA_VOL_MAX: float = 3.0    # max relative_volume (above = climactic, not accumulation)
+
+    # ── Extension from EMA50 ─────────────────────────────────────────────────
+    # ext = (close - ema_50) / ema_50
+    # PA_MIN: up to 5% below EMA50 acceptable (slight pullback near support).
+    # PA_MAX: more than 20% above EMA50 = extended / chasing risk.
+    PA_MIN_EXT_EMA50: float = -0.05
+    PA_MAX_EXT_EMA50: float =  0.20
+
+    # ── Momentum ─────────────────────────────────────────────────────────────
+    # roc_20 must be positive (20-day trend direction).
+    # roc_10 > roc_20 = momentum accelerating short-term (trend gaining speed).
+    PA_MIN_ROC_20: float = 0.0    # medium-term must be positive
+
+    # ── pa_score component weights (must sum to 100) ──────────────────────────
+    PA_SCORE_DAILY_TREND:   int = 25   # pa_hh_daily AND pa_hl_daily
+    PA_SCORE_WEEKLY_TREND:  int = 25   # pa_hh_weekly AND pa_hl_weekly
+    PA_SCORE_CLOSE_QUALITY: int = 15   # close_position >= PA_MIN_CLOSE_POSITION
+    PA_SCORE_VOL_QUALITY:   int = 15   # relative_volume in accumulation range
+    PA_SCORE_MOMENTUM:      int = 10   # roc_10 > roc_20 > 0
+    PA_SCORE_EXTENSION:     int = 10   # close within EMA50 extension limits
+
+    # ── Signal threshold ─────────────────────────────────────────────────────
+    # pa_signal = 1 requires BOTH score >= threshold AND weekly trend confirmed.
+    # Weekly trend is a hard gate — cannot be compensated by other conditions.
+    PA_MIN_SIGNAL_SCORE: float = 70.0
+
+    # ── SQL batch size for stock_pa_signals inserts ───────────────────────────
+    PA_SQL_BATCH_SIZE: int = 1000
 
 
 class ScannerQueryConfig:
