@@ -23,25 +23,11 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-
-import os
-import pyodbc
-from dotenv import load_dotenv
+from sqlalchemy import text
 
 from app.config.logging_config import get_logger
 from app.config.strategy_config import TargetConfig
-
-load_dotenv()
-
-
-def get_connection():
-    """Return a raw pyodbc connection using env credentials."""
-    return pyodbc.connect(
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-        f"SERVER={os.environ['DB_SERVER']};"
-        f"DATABASE={os.environ['DB_NAME']};"
-        f"Trusted_Connection=yes"
-    )
+from app.config.db import engine
 
 logger = get_logger(__name__)
 
@@ -60,23 +46,22 @@ def _score_bucket(score: float) -> int:
     return 0
 
 
-def _model_is_fresh(conn) -> bool:
+def _model_is_fresh() -> bool:
     """Return True if target_confidence_model was built within REBUILD_DAYS."""
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT MAX(computed_at) FROM target_confidence_model"
-    )
-    row = cur.fetchone()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT MAX(computed_at) FROM target_confidence_model")
+        ).fetchone()
     if not row or row[0] is None:
         return False
     age = dt.datetime.utcnow() - row[0]
     return age.days < REBUILD_DAYS
 
 
-def build_model(conn) -> pd.DataFrame:
+def build_model() -> pd.DataFrame:
     """Compute empirical T1/T2/T3 hit rates and persist to target_confidence_model.
 
-    Uses a SQL CROSS APPLY to find the max forward high price for each
+    Uses SQL CROSS APPLY to find the max forward high price for each
     historical breakout signal within the configured hold-day windows.
 
     Returns the model as a DataFrame (also written to the DB table).
@@ -96,7 +81,6 @@ def build_model(conn) -> pd.DataFrame:
                 symbol, trade_date,
                 target_1_price, target_2_price,
                 pivot_price,
-                -- T3 price re-derived in case it was NULL before schema migration
                 ISNULL(
                     target_3_price,
                     pivot_price + (pivot_price - pivot_price * (1 - base_range_pct / 100.0))
@@ -111,7 +95,6 @@ def build_model(conn) -> pd.DataFrame:
               AND target_1_price IS NOT NULL
               AND target_2_price IS NOT NULL
               AND pivot_price    IS NOT NULL
-              -- need at least T2 hold window past signal date to measure outcome
               AND trade_date <= DATEADD(day, -{TargetConfig.CONF_HOLD_DAYS_T2}, GETDATE())
         ) s
         LEFT JOIN market_environment me ON me.trade_date = s.trade_date
@@ -140,37 +123,39 @@ def build_model(conn) -> pd.DataFrame:
         HAVING COUNT(*) >= {TargetConfig.CONF_MIN_SAMPLES}
     """
 
-    model_df = pd.read_sql(sql, conn)
+    model_df = pd.read_sql(sql, engine)
 
     if model_df.empty:
         logger.warning("ConfidenceCalibrator: no rows returned — model not updated")
         return model_df
 
-    # Persist — truncate and reload
-    cur = conn.cursor()
-    cur.execute("DELETE FROM target_confidence_model")
-
     now = dt.datetime.utcnow()
-    for _, row in model_df.iterrows():
-        cur.execute(
-            """
-            INSERT INTO target_confidence_model
-              (score_bucket, market_regime, hit_rate_t1, hit_rate_t2, hit_rate_t3,
-               sample_count, hold_days_t1, hold_days_t2, hold_days_t3, computed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            int(row["score_bucket"]),
-            str(row["market_regime"]),
-            round(float(row["hit_rate_t1"]), 1),
-            round(float(row["hit_rate_t2"]), 1),
-            round(float(row["hit_rate_t3"]), 1),
-            int(row["n"]),
-            TargetConfig.CONF_HOLD_DAYS_T1,
-            TargetConfig.CONF_HOLD_DAYS_T2,
-            TargetConfig.CONF_HOLD_DAYS_T3,
-            now,
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM target_confidence_model"))
+        conn.execute(
+            text("""
+                INSERT INTO target_confidence_model
+                  (score_bucket, market_regime, hit_rate_t1, hit_rate_t2, hit_rate_t3,
+                   sample_count, hold_days_t1, hold_days_t2, hold_days_t3, computed_at)
+                VALUES
+                  (:bucket, :regime, :t1, :t2, :t3, :n, :h1, :h2, :h3, :ts)
+            """),
+            [
+                {
+                    "bucket": int(row["score_bucket"]),
+                    "regime": str(row["market_regime"]),
+                    "t1":     round(float(row["hit_rate_t1"]), 1),
+                    "t2":     round(float(row["hit_rate_t2"]), 1),
+                    "t3":     round(float(row["hit_rate_t3"]), 1),
+                    "n":      int(row["n"]),
+                    "h1":     TargetConfig.CONF_HOLD_DAYS_T1,
+                    "h2":     TargetConfig.CONF_HOLD_DAYS_T2,
+                    "h3":     TargetConfig.CONF_HOLD_DAYS_T3,
+                    "ts":     now,
+                }
+                for _, row in model_df.iterrows()
+            ],
         )
-    conn.commit()
 
     logger.info(
         "ConfidenceCalibrator: model built — %d bucket×regime combinations",
@@ -179,7 +164,7 @@ def build_model(conn) -> pd.DataFrame:
     return model_df
 
 
-def load_model(conn) -> dict[tuple[int, str], dict[str, float]]:
+def load_model() -> dict[tuple[int, str], dict[str, float]]:
     """Load the persisted confidence model into a fast in-memory lookup dict.
 
     Returns:
@@ -188,7 +173,7 @@ def load_model(conn) -> dict[tuple[int, str], dict[str, float]]:
     df = pd.read_sql(
         "SELECT score_bucket, market_regime, hit_rate_t1, hit_rate_t2, hit_rate_t3 "
         "FROM target_confidence_model",
-        conn,
+        engine,
     )
     return {
         (int(r.score_bucket), str(r.market_regime)): {
@@ -200,15 +185,14 @@ def load_model(conn) -> dict[tuple[int, str], dict[str, float]]:
     }
 
 
-def update_today_signals(conn, trade_date: Optional[dt.date] = None) -> int:
+def update_today_signals(trade_date: Optional[dt.date] = None) -> int:
     """Populate confidence_t1/t2/t3 for all stock_signals rows on trade_date.
 
     Looks up each row's (score_bucket, regime) in the confidence model.
     Falls back to the formula-based upside_prob_pct when the model bucket
-    has fewer than CONF_MIN_SAMPLES historical observations.
+    has no data.
 
     Args:
-        conn:       pyodbc connection (auto-committed).
         trade_date: Date to update; defaults to today.
 
     Returns:
@@ -217,80 +201,70 @@ def update_today_signals(conn, trade_date: Optional[dt.date] = None) -> int:
     if trade_date is None:
         trade_date = dt.date.today()
 
-    model = load_model(conn)
+    model = load_model()
     if not model:
         logger.warning("ConfidenceCalibrator: model empty — skipping confidence update")
         return 0
 
-    # Get current regime for the trade date
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT market_state FROM market_environment WHERE trade_date = ?",
-        trade_date,
-    )
-    row = cur.fetchone()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT market_state FROM market_environment WHERE trade_date = :d"),
+            {"d": trade_date},
+        ).fetchone()
     regime = row[0] if row else "UNKNOWN"
 
-    # Fetch today's signals with score info
     signals_df = pd.read_sql(
-        """
-        SELECT id, composite_score, upside_prob_pct
-        FROM stock_signals
-        WHERE trade_date = ?
-          AND target_1_price IS NOT NULL
-        """,
-        conn,
-        params=[trade_date],
+        text(
+            "SELECT id, composite_score, upside_prob_pct "
+            "FROM stock_signals "
+            "WHERE trade_date = :d AND target_1_price IS NOT NULL"
+        ),
+        engine,
+        params={"d": trade_date},
     )
 
     if signals_df.empty:
         return 0
 
-    # Map each row to its confidence values
-    rows_updated = 0
-    update_sql = """
-        UPDATE stock_signals
-        SET confidence_t1 = ?, confidence_t2 = ?, confidence_t3 = ?
-        WHERE id = ?
-    """
-
+    rows: list[dict] = []
     for _, sig in signals_df.iterrows():
         bucket = _score_bucket(float(sig["composite_score"]))
         conf   = model.get((bucket, regime)) or model.get((bucket, "UNKNOWN"))
 
         if conf:
-            c1, c2, c3 = round(conf["t1"], 1), round(conf["t2"], 1), round(conf["t3"], 1)
+            c1 = round(conf["t1"], 1)
+            c2 = round(conf["t2"], 1)
+            c3 = round(conf["t3"], 1)
         else:
-            # Fallback: derive rough estimates from formula-based probability
             prob = float(sig["upside_prob_pct"]) if pd.notna(sig["upside_prob_pct"]) else 40.0
             c2   = round(prob, 1)
-            c1   = round(min(prob * 1.5, 95.0), 1)    # T1 (half-move) hits more often
-            c3   = round(min(prob * 2.0, 99.0), 1)    # T3 (quarter-move) hits most often
+            c1   = round(min(prob * 1.5, 95.0), 1)
+            c3   = round(min(prob * 2.0, 99.0), 1)
 
-        cur.execute(update_sql, c1, c2, c3, int(sig["id"]))
-        rows_updated += 1
+        rows.append({"c1": c1, "c2": c2, "c3": c3, "sid": int(sig["id"])})
 
-    conn.commit()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE stock_signals "
+                "SET confidence_t1 = :c1, confidence_t2 = :c2, confidence_t3 = :c3 "
+                "WHERE id = :sid"
+            ),
+            rows,
+        )
+
     logger.info(
         "ConfidenceCalibrator: updated %d rows for %s (regime=%s)",
-        rows_updated, trade_date, regime,
+        len(rows), trade_date, regime,
     )
-    return rows_updated
+    return len(rows)
 
 
 def run(trade_date: Optional[dt.date] = None) -> None:
-    """Entry point called from MasterPipeline.
+    """Entry point called from MasterPipeline."""
+    if not _model_is_fresh():
+        build_model()
+    else:
+        logger.info("ConfidenceCalibrator: model is fresh — skipping rebuild")
 
-    Rebuilds the hit-rate model if stale, then stamps confidence columns
-    for today's signals.
-    """
-    conn = get_connection()
-    try:
-        if not _model_is_fresh(conn):
-            build_model(conn)
-        else:
-            logger.info("ConfidenceCalibrator: model is fresh — skipping rebuild")
-
-        update_today_signals(conn, trade_date)
-    finally:
-        conn.close()
+    update_today_signals(trade_date)
