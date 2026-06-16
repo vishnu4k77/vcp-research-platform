@@ -318,6 +318,8 @@ _DISPLAY_NAMES: dict[str, str] = {
     "risk_reward_t2":              "R:R",
     "upside_prob_pct":             "Est Prob%",
     "ev_score":                    "EV%",
+    "position_stage":              "Stage",
+    "trailing_stop_price":         "Trail Stop ₹",
     "pa_signal":                   "PA",
     "pa_daily_trend":              "PA Daily",
     "pa_weekly_trend":             "PA Weekly",
@@ -457,6 +459,21 @@ def _style_confidence(val) -> str:
         return f"color: {RED}"
     except (TypeError, ValueError):
         return f"color: {TEXT_MUTED}"
+
+
+_STAGE_COLORS: dict[str, str] = {
+    "IN_BASE":  TEXT_MUTED,
+    "ACTIVE":   BLUE,
+    "NEAR_T1":  ORANGE,
+    "PAST_T1":  GREEN,
+    "PAST_T2":  "#bc8cff",   # purple — overextended, consider exit
+}
+
+
+def _style_stage(val) -> str:
+    """Color position_stage chip."""
+    color = _STAGE_COLORS.get(str(val).strip(), TEXT_MUTED)
+    return f"color: {color}; font-weight: 600"
 
 
 # ── Regime badge ─────────────────────────────────────────────────────────────
@@ -880,9 +897,10 @@ def render_scanner_table() -> None:
         _DISPLAY_NAMES.get("target_2_price", "T2 ₹"):    "{:.1f}",
         _DISPLAY_NAMES.get("target_2_pct",   "T2 %"):    "{:.1f}%",
         _DISPLAY_NAMES.get("confidence_t2",  "T2 Conf%"): "{:.0f}%",
-        _DISPLAY_NAMES.get("risk_reward_t2","R:R"):      "{:.2f}",
+        _DISPLAY_NAMES.get("risk_reward_t2","R:R"):        "{:.2f}",
         _DISPLAY_NAMES.get("upside_prob_pct","Est Prob%"): "{:.1f}%",
-        _DISPLAY_NAMES.get("ev_score",       "EV%"):       "{:.1f}%",
+        _DISPLAY_NAMES.get("ev_score",       "EV%"):        "{:.1f}%",
+        _DISPLAY_NAMES.get("trailing_stop_price","Trail Stop ₹"): "{:.1f}",
     }
     if "fund_promoter_pct" in df.columns:
         fmt[_DISPLAY_NAMES["fund_promoter_pct"]] = "{:.1f}%"
@@ -891,16 +909,18 @@ def render_scanner_table() -> None:
     if "fund_roce" in df.columns:
         fmt[_DISPLAY_NAMES["fund_roce"]] = "{:.1f}%"
 
-    s2age_col = _DISPLAY_NAMES.get("stage2_days",    "S2 Age(d)")
-    t1_col    = _DISPLAY_NAMES.get("target_1_pct",   "T1 %")
-    t2_col    = _DISPLAY_NAMES.get("target_2_pct",   "T2 %")
-    t3_col    = _DISPLAY_NAMES.get("target_3_pct",   "T3 %")
-    c1_col    = _DISPLAY_NAMES.get("confidence_t1",  "T1 Conf%")
-    c2_col    = _DISPLAY_NAMES.get("confidence_t2",  "T2 Conf%")
-    c3_col    = _DISPLAY_NAMES.get("confidence_t3",  "T3 Conf%")
-    rr_col    = _DISPLAY_NAMES.get("risk_reward_t2", "R:R")
-    prob_col  = _DISPLAY_NAMES.get("upside_prob_pct","Est Prob%")
-    ev_col    = _DISPLAY_NAMES.get("ev_score",       "EV%")
+    s2age_col  = _DISPLAY_NAMES.get("stage2_days",         "S2 Age(d)")
+    t1_col     = _DISPLAY_NAMES.get("target_1_pct",        "T1 %")
+    t2_col     = _DISPLAY_NAMES.get("target_2_pct",        "T2 %")
+    t3_col     = _DISPLAY_NAMES.get("target_3_pct",        "T3 %")
+    c1_col     = _DISPLAY_NAMES.get("confidence_t1",       "T1 Conf%")
+    c2_col     = _DISPLAY_NAMES.get("confidence_t2",       "T2 Conf%")
+    c3_col     = _DISPLAY_NAMES.get("confidence_t3",       "T3 Conf%")
+    rr_col     = _DISPLAY_NAMES.get("risk_reward_t2",      "R:R")
+    prob_col   = _DISPLAY_NAMES.get("upside_prob_pct",     "Est Prob%")
+    ev_col     = _DISPLAY_NAMES.get("ev_score",            "EV%")
+    stage_col  = _DISPLAY_NAMES.get("position_stage",      "Stage")
+    tstop_col  = _DISPLAY_NAMES.get("trailing_stop_price", "Trail Stop ₹")
 
     styled = display.style.map(_style_signals, subset=sig_display_names)
     if score_col in display.columns:
@@ -921,6 +941,8 @@ def render_scanner_table() -> None:
         styled = styled.map(_style_prob, subset=[prob_col])
     if ev_col in display.columns:
         styled = styled.map(_style_ev, subset=[ev_col])
+    if stage_col in display.columns:
+        styled = styled.map(_style_stage, subset=[stage_col])
     styled = styled.format(fmt, na_rep="—")
 
     # Fixed widths force overflow → draggable horizontal scrollbar.
@@ -946,8 +968,10 @@ def render_scanner_table() -> None:
         "T2 Conf%":    st.column_config.NumberColumn(format="%.0f%%",  width=78),
         "R:R":         st.column_config.NumberColumn(format="%.2f",    width=58),
         "Est Prob%":   st.column_config.NumberColumn(format="%.1f%%",  width=82),
-        "EV%":         st.column_config.NumberColumn(format="%.1f%%",  width=68),
-        "Fund Score":  st.column_config.NumberColumn(format="%.1f",    width=82),
+        "EV%":           st.column_config.NumberColumn(format="%.1f%%",  width=68),
+        "Stage":         st.column_config.TextColumn(width=88),
+        "Trail Stop ₹":  st.column_config.NumberColumn(format="%.1f",   width=100),
+        "Fund Score":    st.column_config.NumberColumn(format="%.1f",    width=82),
         "Promoter%":   st.column_config.NumberColumn(format="%.1f%%",  width=88),
         "ROE%":        st.column_config.NumberColumn(format="%.1f%%",  width=65),
         "ROCE%":       st.column_config.NumberColumn(format="%.1f%%",  width=68),

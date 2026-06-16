@@ -104,6 +104,62 @@ class TargetCalculator:
         if "confidence_t3" not in df.columns:
             df["confidence_t3"] = np.nan
 
+        # ── Position stage + dynamic trailing stop ───────────────────────
+        # Tells the user WHERE their position is relative to targets so they
+        # know whether to hold, trail the stop, or take profits.
+        #
+        # Stage logic (Minervini / O'Neil framework):
+        #   IN_BASE     price still below pivot  → no signal yet, watch only
+        #   ACTIVE      pivot ≤ price < T1×0.97  → hold, stop at pivot×0.93
+        #   NEAR_T1     within 3% of T1          → partial exit, trail to pivot
+        #   PAST_T1     T1 < price ≤ T2          → move stop to T1, aim for T2
+        #   PAST_T2     price > T2               → consider full exit, stop at T2
+        #
+        # Trailing stop uses the higher of ATR-based support and level-based stop:
+        #   ATR support  = close − (1.5 × ATR14)  — respects current volatility
+        #   Level stop   = stage-specific price level
+        # The MAX of the two prevents the stop being set BELOW current support.
+
+        ema21   = _col("ema_21")
+        atr14   = _col("atr_14")
+
+        # ATR trailing support: close - 1.5 × ATR (adapts to volatility expansion)
+        atr_support = (safe_close - 1.5 * atr14.fillna(0)).clip(lower=0)
+
+        # Stage classification — vectorised, no row-by-row loop
+        in_base    = safe_close < safe_pivot
+        past_t2    = safe_close > t2_price
+        past_t1    = (safe_close > t1_price) & ~past_t2
+        near_t1    = (safe_close >= t1_price * 0.97) & (safe_close <= t1_price)
+        active     = (safe_close >= safe_pivot) & (safe_close < t1_price * 0.97)
+
+        stage = pd.Series("IN_BASE", index=df.index, dtype=object)
+        stage = stage.where(~active,  "ACTIVE")
+        stage = stage.where(~near_t1, "NEAR_T1")
+        stage = stage.where(~past_t1, "PAST_T1")
+        stage = stage.where(~past_t2, "PAST_T2")
+        df["position_stage"] = np.where(safe_pivot.notna(), stage, None)
+
+        # Trailing stop — rises as position moves through stages
+        stop_at_pivot   = (safe_pivot * (1 - TargetConfig.STOP_LOSS_PCT)).round(2)
+        stop_at_t1      = (t1_price   * 0.98).round(2)   # 2% below T1 (wiggle room)
+        stop_at_t2      = (t2_price   * 0.98).round(2)   # 2% below T2
+
+        trailing = pd.Series(np.nan, index=df.index)
+        # IN_BASE / ACTIVE: stop below pivot, raised further by ATR support
+        trailing = trailing.where(~in_base,  np.maximum(stop_at_pivot, atr_support))
+        trailing = trailing.where(~active,   np.maximum(stop_at_pivot, atr_support))
+        # NEAR_T1: move stop to near breakeven (pivot level), rising with ATR
+        trailing = trailing.where(~near_t1,  np.maximum(stop_at_pivot, atr_support))
+        # PAST_T1: stop at T1 level — locks in first-target profit
+        trailing = trailing.where(~past_t1,  np.maximum(stop_at_t1, atr_support))
+        # PAST_T2: stop at T2 — locks in full-measured-move profit
+        trailing = trailing.where(~past_t2,  np.maximum(stop_at_t2, atr_support))
+
+        df["trailing_stop_price"] = np.where(
+            safe_pivot.notna(), trailing.round(2), np.nan
+        )
+
         # ── Risk : Reward to T2 ───────────────────────────────────────────
         stop_pct = TargetConfig.STOP_LOSS_PCT * 100   # 7.0%
         df["risk_reward_t2"] = (df["target_2_pct"] / stop_pct).round(2)

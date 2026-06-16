@@ -321,6 +321,8 @@ class ScannerService:
                 ss.risk_reward_t2,
                 ss.upside_prob_pct,
                 ss.ev_score,
+                ss.position_stage,
+                ss.trailing_stop_price,
                 sf.quality_score        AS fund_quality_score,
                 sf.promoter_holding     AS fund_promoter_pct,
                 sf.roe                  AS fund_roe,
