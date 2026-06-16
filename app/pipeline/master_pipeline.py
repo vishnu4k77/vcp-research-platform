@@ -159,8 +159,6 @@ class MasterPipeline:
             return MasterPipeline._finalize(context)
 
         # ── Step 6: Sector momentum (non-blocking) ────────────────────────
-        # Consumes stock_signals produced in Step 4 — must run after signals.
-        # A scoring failure never aborts the overall pipeline.
         logger.info("── Step [sector_momentum] starting")
         try:
             SectorMomentum.run()
@@ -170,6 +168,24 @@ class MasterPipeline:
             logger.warning("── Step [sector_momentum] failed (non-blocking): %s", exc)
             context.add_warning(f"Sector momentum step failed: {exc}")
             context.mark_step_completed("sector_momentum")
+
+        # ── Step 7: Confidence calibration (non-blocking) ─────────────────
+        # Builds or refreshes the empirical T1/T2/T3 hit-rate model from
+        # 5 years of daily_price_data, then stamps confidence_t1/t2/t3 on
+        # today's stock_signals rows.  Rebuilt at most once every 7 days;
+        # skipped silently when model is still fresh.
+        logger.info("── Step [confidence_calibration] starting")
+        try:
+            from app.signals.confidence_calibrator import run as _run_confidence
+            _run_confidence()
+            context.mark_step_completed("confidence_calibration")
+            logger.info("── Step [confidence_calibration] completed")
+        except Exception as exc:
+            logger.warning(
+                "── Step [confidence_calibration] failed (non-blocking): %s", exc
+            )
+            context.add_warning(f"Confidence calibration failed: {exc}")
+            context.mark_step_completed("confidence_calibration")
 
         return MasterPipeline._finalize(context)
 

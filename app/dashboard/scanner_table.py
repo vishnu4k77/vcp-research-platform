@@ -306,10 +306,15 @@ _DISPLAY_NAMES: dict[str, str] = {
     "distance_from_52w_high_pct":  "Dist 52w%",
     "pivot_price":                 "Pivot ₹",
     "base_range_pct":              "Base %",
+    "target_3_price":              "T3 ₹",
+    "target_3_pct":                "T3 %",
+    "confidence_t3":               "T3 Conf%",
     "target_1_price":              "T1 ₹",
     "target_1_pct":                "T1 %",
+    "confidence_t1":               "T1 Conf%",
     "target_2_price":              "T2 ₹",
     "target_2_pct":                "T2 %",
+    "confidence_t2":               "T2 Conf%",
     "risk_reward_t2":              "R:R",
     "upside_prob_pct":             "Est Prob%",
     "ev_score":                    "EV%",
@@ -435,6 +440,19 @@ def _style_ev(val) -> str:
         if v >= 5.0:
             return f"color: {GREEN}; font-weight: 700"
         if v >= 0.0:
+            return f"color: {ORANGE}; font-weight: 600"
+        return f"color: {RED}"
+    except (TypeError, ValueError):
+        return f"color: {TEXT_MUTED}"
+
+
+def _style_confidence(val) -> str:
+    """Color confidence %: green ≥ 80%, orange ≥ 55%, red < 55%."""
+    try:
+        v = float(val)
+        if v >= 80.0:
+            return f"color: {GREEN}; font-weight: 700"
+        if v >= 55.0:
             return f"color: {ORANGE}; font-weight: 600"
         return f"color: {RED}"
     except (TypeError, ValueError):
@@ -853,10 +871,15 @@ def render_scanner_table() -> None:
         _DISPLAY_NAMES.get("distance_from_52w_high_pct","Dist 52w%"):  "{:.1f}%",
         _DISPLAY_NAMES.get("pivot_price",    "Pivot ₹"):  "{:.1f}",
         _DISPLAY_NAMES.get("base_range_pct", "Base %"):  "{:.1f}%",
+        _DISPLAY_NAMES.get("target_3_price", "T3 ₹"):    "{:.1f}",
+        _DISPLAY_NAMES.get("target_3_pct",   "T3 %"):    "{:.1f}%",
+        _DISPLAY_NAMES.get("confidence_t3",  "T3 Conf%"): "{:.0f}%",
         _DISPLAY_NAMES.get("target_1_price", "T1 ₹"):    "{:.1f}",
         _DISPLAY_NAMES.get("target_1_pct",   "T1 %"):    "{:.1f}%",
+        _DISPLAY_NAMES.get("confidence_t1",  "T1 Conf%"): "{:.0f}%",
         _DISPLAY_NAMES.get("target_2_price", "T2 ₹"):    "{:.1f}",
         _DISPLAY_NAMES.get("target_2_pct",   "T2 %"):    "{:.1f}%",
+        _DISPLAY_NAMES.get("confidence_t2",  "T2 Conf%"): "{:.0f}%",
         _DISPLAY_NAMES.get("risk_reward_t2","R:R"):      "{:.2f}",
         _DISPLAY_NAMES.get("upside_prob_pct","Est Prob%"): "{:.1f}%",
         _DISPLAY_NAMES.get("ev_score",       "EV%"):       "{:.1f}%",
@@ -868,12 +891,16 @@ def render_scanner_table() -> None:
     if "fund_roce" in df.columns:
         fmt[_DISPLAY_NAMES["fund_roce"]] = "{:.1f}%"
 
-    s2age_col    = _DISPLAY_NAMES.get("stage2_days",    "S2 Age(d)")
-    t1_col       = _DISPLAY_NAMES.get("target_1_pct",   "T1 %")
-    t2_col       = _DISPLAY_NAMES.get("target_2_pct",   "T2 %")
-    rr_col       = _DISPLAY_NAMES.get("risk_reward_t2", "R:R")
-    prob_col     = _DISPLAY_NAMES.get("upside_prob_pct","Est Prob%")
-    ev_col       = _DISPLAY_NAMES.get("ev_score",       "EV%")
+    s2age_col = _DISPLAY_NAMES.get("stage2_days",    "S2 Age(d)")
+    t1_col    = _DISPLAY_NAMES.get("target_1_pct",   "T1 %")
+    t2_col    = _DISPLAY_NAMES.get("target_2_pct",   "T2 %")
+    t3_col    = _DISPLAY_NAMES.get("target_3_pct",   "T3 %")
+    c1_col    = _DISPLAY_NAMES.get("confidence_t1",  "T1 Conf%")
+    c2_col    = _DISPLAY_NAMES.get("confidence_t2",  "T2 Conf%")
+    c3_col    = _DISPLAY_NAMES.get("confidence_t3",  "T3 Conf%")
+    rr_col    = _DISPLAY_NAMES.get("risk_reward_t2", "R:R")
+    prob_col  = _DISPLAY_NAMES.get("upside_prob_pct","Est Prob%")
+    ev_col    = _DISPLAY_NAMES.get("ev_score",       "EV%")
 
     styled = display.style.map(_style_signals, subset=sig_display_names)
     if score_col in display.columns:
@@ -882,10 +909,12 @@ def render_scanner_table() -> None:
         styled = styled.map(_style_stage2_age, subset=[s2age_col])
     if fscore_col in display.columns:
         styled = styled.map(_style_fund_score, subset=[fscore_col])
-    if t1_col in display.columns:
-        styled = styled.map(_style_target_pct, subset=[t1_col])
-    if t2_col in display.columns:
-        styled = styled.map(_style_target_pct, subset=[t2_col])
+    for col in (t1_col, t2_col, t3_col):
+        if col in display.columns:
+            styled = styled.map(_style_target_pct, subset=[col])
+    for col in (c1_col, c2_col, c3_col):
+        if col in display.columns:
+            styled = styled.map(_style_confidence, subset=[col])
     if rr_col in display.columns:
         styled = styled.map(_style_risk_reward, subset=[rr_col])
     if prob_col in display.columns:
@@ -894,10 +923,7 @@ def render_scanner_table() -> None:
         styled = styled.map(_style_ev, subset=[ev_col])
     styled = styled.format(fmt, na_rep="—")
 
-    # Only set explicit widths for non-boolean columns.
-    # Signal/IC columns are left out so Streamlit auto-detects them as booleans → checkboxes.
-    # Fixed widths force the total to exceed the container, giving a clean
-    # internal horizontal scrollbar — the same pattern as the backtest tab.
+    # Fixed widths force overflow → draggable horizontal scrollbar.
     _col_cfg: dict = {
         "#":           st.column_config.NumberColumn(format="%d",      width=42),
         "Symbol":      st.column_config.TextColumn(width=115),
@@ -909,10 +935,15 @@ def render_scanner_table() -> None:
         "Dist 52w%":   st.column_config.NumberColumn(format="%.1f%%",  width=85),
         "Pivot ₹":     st.column_config.NumberColumn(format="%.1f",    width=78),
         "Base %":      st.column_config.NumberColumn(format="%.1f%%",  width=68),
+        "T3 ₹":        st.column_config.NumberColumn(format="%.1f",    width=75),
+        "T3 %":        st.column_config.NumberColumn(format="%.1f%%",  width=60),
+        "T3 Conf%":    st.column_config.NumberColumn(format="%.0f%%",  width=78),
         "T1 ₹":        st.column_config.NumberColumn(format="%.1f",    width=78),
         "T1 %":        st.column_config.NumberColumn(format="%.1f%%",  width=62),
+        "T1 Conf%":    st.column_config.NumberColumn(format="%.0f%%",  width=78),
         "T2 ₹":        st.column_config.NumberColumn(format="%.1f",    width=78),
         "T2 %":        st.column_config.NumberColumn(format="%.1f%%",  width=62),
+        "T2 Conf%":    st.column_config.NumberColumn(format="%.0f%%",  width=78),
         "R:R":         st.column_config.NumberColumn(format="%.2f",    width=58),
         "Est Prob%":   st.column_config.NumberColumn(format="%.1f%%",  width=82),
         "EV%":         st.column_config.NumberColumn(format="%.1f%%",  width=68),

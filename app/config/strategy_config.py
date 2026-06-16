@@ -550,31 +550,49 @@ class TargetConfig:
         3. Replace BASE_PROB_PCT and PROB_ADJ_* with empirical values
     """
 
-    T1_MULTIPLIER: float = 0.50   # T1 = pivot + base_range × 0.5
-    T2_MULTIPLIER: float = 1.00   # T2 = pivot + base_range × 1.0
+    T1_MULTIPLIER: float = 0.50   # T1 = pivot + base_range × 0.5  (half measured move)
+    T2_MULTIPLIER: float = 1.00   # T2 = pivot + base_range × 1.0  (full measured move)
+    T3_MULTIPLIER: float = 0.25   # T3 = pivot + base_range × 0.25 (conservative early gain)
 
     # Must mirror BacktestConfig.STOP_LOSS_PCT — keeps R:R denominator consistent
     STOP_LOSS_PCT: float = 0.07   # 7% below entry close
 
+    # ── Confidence calibration windows ────────────────────────────────────────
+    # How many calendar days forward to check if a target was hit.
+    # T3 is a near-term safe target → 20 days; T2 full-move needs 60; T3_LONG = 90.
+    CONF_HOLD_DAYS_T1: int = 30   # look 30 days forward for T1 hit
+    CONF_HOLD_DAYS_T2: int = 60   # look 60 days forward for T2 hit
+    CONF_HOLD_DAYS_T3: int = 20   # T3 is conservative — expect hit within 20 days
+
+    # Minimum historical samples before trusting the empirical model for a bucket.
+    # Buckets below this fall back to formula-based upside_prob_pct.
+    CONF_MIN_SAMPLES: int = 30
+
+    # Confidence threshold to colour T3 green in the UI (user target: ≥ 90%)
+    CONF_T3_GREEN_THRESHOLD: float = 90.0
+
     # ── Probability model — baseline + per-signal quality adjustments ──────────
     # Baseline calibrated to our own backtest: 44.2% win rate with breakout_signal
     # (20% target, 7% stop, 60-day hold).  Adjustments are additive, capped at MAX_PROB_PCT.
+    # NOTE: upside_prob_pct is kept for legacy EV computation.
+    #       confidence_t1 / confidence_t2 / confidence_t3 are the empirically-calibrated
+    #       replacements populated by ConfidenceCalibrator after each pipeline run.
     BASE_PROB_PCT: float = 40.0
 
-    PROB_ADJ_BREAKOUT_SIGNAL:  float =  5.0  # breakout confirmed (vs setup only)
-    PROB_ADJ_MINERVINI_SIGNAL: float =  8.0  # all 8 Trend Template conditions met
-    PROB_ADJ_RS_NEW_HIGH:      float =  5.0  # RS line at 1-year rolling high
-    PROB_ADJ_DARVAS_SIGNAL:    float =  7.0  # near 52w high — minimal overhead supply
-    PROB_ADJ_HIGH_SCORE:       float =  5.0  # composite_score >= HIGH_SCORE_THRESHOLD
-    PROB_ADJ_FRESH_STAGE2:     float =  3.0  # stage2_days <= FRESH_STAGE2_DAYS (early run)
-    PROB_ADJ_LATE_STAGE2:      float = -5.0  # stage2_days > LATE_STAGE2_DAYS (distribution risk)
+    PROB_ADJ_BREAKOUT_SIGNAL:  float =  5.0
+    PROB_ADJ_MINERVINI_SIGNAL: float =  8.0
+    PROB_ADJ_RS_NEW_HIGH:      float =  5.0
+    PROB_ADJ_DARVAS_SIGNAL:    float =  7.0
+    PROB_ADJ_HIGH_SCORE:       float =  5.0
+    PROB_ADJ_FRESH_STAGE2:     float =  3.0
+    PROB_ADJ_LATE_STAGE2:      float = -5.0
 
     HIGH_SCORE_THRESHOLD: float = 80.0
     FRESH_STAGE2_DAYS:    int   = 20
     LATE_STAGE2_DAYS:     int   = 60
 
-    MAX_PROB_PCT: float = 75.0   # cap — markets are never certain
-    MIN_PROB_PCT: float = 20.0   # floor — even weak setups carry some base probability
+    MAX_PROB_PCT: float = 75.0
+    MIN_PROB_PCT: float = 20.0
 
 
 class PriceActionConfig:

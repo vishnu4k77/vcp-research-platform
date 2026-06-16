@@ -90,6 +90,20 @@ class TargetCalculator:
         df["target_1_pct"] = ((t1_price / safe_close - 1) * 100).round(2)
         df["target_2_pct"] = ((t2_price / safe_close - 1) * 100).round(2)
 
+        # ── T3 — conservative early-gain target (25% of measured move) ──────
+        t3_price = safe_pivot + base_range * TargetConfig.T3_MULTIPLIER
+        df["target_3_price"] = np.where(safe_pivot.notna(), t3_price.round(2), np.nan)
+        df["target_3_pct"]   = ((t3_price / safe_close - 1) * 100).round(2)
+
+        # Confidence columns are placeholders here — filled per-stock after
+        # ConfidenceCalibrator builds the empirical hit-rate model.
+        if "confidence_t1" not in df.columns:
+            df["confidence_t1"] = np.nan
+        if "confidence_t2" not in df.columns:
+            df["confidence_t2"] = np.nan
+        if "confidence_t3" not in df.columns:
+            df["confidence_t3"] = np.nan
+
         # ── Risk : Reward to T2 ───────────────────────────────────────────
         stop_pct = TargetConfig.STOP_LOSS_PCT * 100   # 7.0%
         df["risk_reward_t2"] = (df["target_2_pct"] / stop_pct).round(2)
