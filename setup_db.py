@@ -325,6 +325,36 @@ TABLE_DDL_EXTRA = {
         )
     """,
 
+    # Multi-Timeframe signals — populated by scripts/run_mtf_pipeline.py.
+    # Completely independent of stock_signals — zero disturbance to existing pipeline.
+    # scanner_service.get_scanner_data() LEFT JOINs this table so mtf_weekly_trend,
+    # mtf_monthly_trend, and mtf_score appear in scanner rows; returns 0 when
+    # MTF pipeline has not yet run for the requested date.
+    # Truncated and recomputed on each MTF pipeline run (same pattern as stock_pa_signals).
+    #
+    # EMA columns store the actual ₹ value of the last completed bar's EMA so the
+    # stock detail page can chart them in future without re-computing.
+    "stock_mtf_signals": """
+        CREATE TABLE stock_mtf_signals (
+            id                BIGINT      IDENTITY(1,1) NOT NULL,
+            symbol            VARCHAR(20) NOT NULL,
+            trade_date        DATE        NOT NULL,
+            -- weekly EMA values (₹) from last completed weekly bar
+            mtf_w_ema_fast    FLOAT       NULL,
+            mtf_w_ema_slow    FLOAT       NULL,
+            -- monthly EMA values (₹) from last completed monthly bar
+            mtf_m_ema_fast    FLOAT       NULL,
+            mtf_m_ema_slow    FLOAT       NULL,
+            -- BIT trend signals (1 = uptrend on that timeframe, 0 = not)
+            mtf_weekly_trend  BIT         NOT NULL CONSTRAINT df_mtfw  DEFAULT 0,
+            mtf_monthly_trend BIT         NOT NULL CONSTRAINT df_mtfm  DEFAULT 0,
+            -- composite score: weekly_trend + monthly_trend (range 0-2)
+            mtf_score         INT         NOT NULL CONSTRAINT df_mtfs  DEFAULT 0,
+            CONSTRAINT pk_stock_mtf_signals  PRIMARY KEY (id),
+            CONSTRAINT uq_smtf_symbol_date   UNIQUE (symbol, trade_date)
+        )
+    """,
+
     # Price Action signals — populated by scripts/run_pa_pipeline.py.
     # Completely independent of stock_signals — zero disturbance to existing pipeline.
     # scanner_service.get_scanner_data() LEFT JOINs this table so pa_signal
@@ -380,6 +410,7 @@ REQUIRED_TABLES = [
     "sector_momentum",            # sector rotation scores — computed after each signal run
     "saved_queries",              # user-saved scanner SQL strings from the dashboard UI
     "stock_pa_signals",           # price action signals — populated by run_pa_pipeline.py
+    "stock_mtf_signals",          # multi-timeframe EMA trend signals — populated by run_mtf_pipeline.py
 ]
 
 

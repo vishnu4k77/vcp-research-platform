@@ -283,7 +283,9 @@ _SIGNAL_COLUMNS = [
     "liquidity_signal",
     "quality_signal",
     "rs_signal",
-    "pa_signal",       # price action — populated by run_pa_pipeline.py
+    "pa_signal",           # price action — populated by run_pa_pipeline.py
+    "mtf_weekly_trend",    # weekly EMA uptrend — populated by run_mtf_pipeline.py
+    "mtf_monthly_trend",   # monthly EMA uptrend — populated by run_mtf_pipeline.py
 ]
 
 _DISPLAY_NAMES: dict[str, str] = {
@@ -320,10 +322,14 @@ _DISPLAY_NAMES: dict[str, str] = {
     "ev_score":                    "EV%",
     "position_stage":              "Stage",
     "trailing_stop_price":         "Trail Stop ₹",
+    "safe_exit_price":             "Safe Exit ₹",
     "pa_signal":                   "PA",
     "pa_daily_trend":              "PA Daily",
     "pa_weekly_trend":             "PA Weekly",
     "pa_score":                    "PA Score",
+    "mtf_weekly_trend":            "W Trend",
+    "mtf_monthly_trend":           "M Trend",
+    "mtf_score":                   "MTF",
     "fund_quality_score":          "Fund Score",
     "fund_promoter_pct":           "Promoter%",
     "fund_roe":                    "ROE%",
@@ -442,6 +448,19 @@ def _style_ev(val) -> str:
         if v >= 5.0:
             return f"color: {GREEN}; font-weight: 700"
         if v >= 0.0:
+            return f"color: {ORANGE}; font-weight: 600"
+        return f"color: {RED}"
+    except (TypeError, ValueError):
+        return f"color: {TEXT_MUTED}"
+
+
+def _style_mtf_score(val) -> str:
+    """Color MTF score: green=2 (both timeframes aligned), orange=1, red=0."""
+    try:
+        v = int(val)
+        if v >= 2:
+            return f"color: {GREEN}; font-weight: 700"
+        if v >= 1:
             return f"color: {ORANGE}; font-weight: 600"
         return f"color: {RED}"
     except (TypeError, ValueError):
@@ -842,6 +861,16 @@ def render_scanner_table() -> None:
         )
         st.caption(f"Preset weights: {weights_str}")
 
+    # ── Safe Exit — minimum price to exit without a loss ─────────────────────
+    # MAX(pivot_price, trailing_stop_price): when trailing stop is still below
+    # pivot (ACTIVE stage), safe exit = pivot (breakeven). Once trailing stop
+    # rises past pivot (PAST_T1/PAST_T2), safe exit = trailing stop (profit locked).
+    if "pivot_price" in df.columns and "trailing_stop_price" in df.columns:
+        df["safe_exit_price"] = np.maximum(
+            pd.to_numeric(df["pivot_price"],        errors="coerce"),
+            pd.to_numeric(df["trailing_stop_price"], errors="coerce"),
+        ).round(2)
+
     # ── Build display DataFrame ───────────────────────────────────────────────
     # Core columns always shown (stage2_started_date excluded — too wide for table view)
     # fundamental columns appended when data exists
@@ -901,6 +930,8 @@ def render_scanner_table() -> None:
         _DISPLAY_NAMES.get("upside_prob_pct","Est Prob%"): "{:.1f}%",
         _DISPLAY_NAMES.get("ev_score",       "EV%"):        "{:.1f}%",
         _DISPLAY_NAMES.get("trailing_stop_price","Trail Stop ₹"): "{:.1f}",
+        _DISPLAY_NAMES.get("safe_exit_price",   "Safe Exit ₹"):  "{:.1f}",
+        _DISPLAY_NAMES.get("mtf_score",         "MTF"):           "{:.0f}",
     }
     if "fund_promoter_pct" in df.columns:
         fmt[_DISPLAY_NAMES["fund_promoter_pct"]] = "{:.1f}%"
@@ -943,6 +974,9 @@ def render_scanner_table() -> None:
         styled = styled.map(_style_ev, subset=[ev_col])
     if stage_col in display.columns:
         styled = styled.map(_style_stage, subset=[stage_col])
+    mtf_score_col = _DISPLAY_NAMES.get("mtf_score", "MTF")
+    if mtf_score_col in display.columns:
+        styled = styled.map(_style_mtf_score, subset=[mtf_score_col])
     styled = styled.format(fmt, na_rep="—")
 
     # Fixed widths force overflow → draggable horizontal scrollbar.
@@ -971,6 +1005,10 @@ def render_scanner_table() -> None:
         "EV%":           st.column_config.NumberColumn(format="%.1f%%",  width=68),
         "Stage":         st.column_config.TextColumn(width=88),
         "Trail Stop ₹":  st.column_config.NumberColumn(format="%.1f",   width=100),
+        "Safe Exit ₹":   st.column_config.NumberColumn(format="%.1f",   width=90),
+        "W Trend":       st.column_config.NumberColumn(format="%d",      width=68),
+        "M Trend":       st.column_config.NumberColumn(format="%d",      width=68),
+        "MTF":           st.column_config.NumberColumn(format="%d",      width=52),
         "Fund Score":    st.column_config.NumberColumn(format="%.1f",    width=82),
         "Promoter%":   st.column_config.NumberColumn(format="%.1f%%",  width=88),
         "ROE%":        st.column_config.NumberColumn(format="%.1f%%",  width=65),

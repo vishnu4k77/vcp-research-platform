@@ -92,6 +92,7 @@ class BacktestEngine:
         min_composite_score: float          = BacktestConfig.MIN_COMPOSITE_SCORE,
         min_stage2_days: Optional[int]      = None,
         max_stage2_days: Optional[int]      = None,
+        min_mtf_score: Optional[int]        = None,
     ) -> BacktestResult:
         """Run the full backtest simulation.
 
@@ -106,28 +107,34 @@ class BacktestEngine:
             min_stage2_days: Lower bound on stage2_days (None = no filter).
                              Used to restrict to Early / Mid / Advanced Stage 2.
             max_stage2_days: Upper bound on stage2_days (None = no filter).
+            min_mtf_score:  Minimum MTF score gate (None = no filter).
+                             1 = at least one timeframe (weekly OR monthly) aligned.
+                             2 = full macro confirmation (weekly AND monthly aligned).
+                             Requires stock_mtf_signals populated by run_mtf_pipeline.py.
 
         Returns:
             BacktestResult containing trades DataFrame, metrics dict, and params.
         """
         params = {
-            "start_date":         str(start_date),
-            "end_date":           str(end_date),
-            "entry_signal":       entry_signal,
-            "stop_loss_pct":      stop_loss_pct,
-            "target_pct":         target_pct,
-            "max_holding_days":   max_holding_days,
+            "start_date":          str(start_date),
+            "end_date":            str(end_date),
+            "entry_signal":        entry_signal,
+            "stop_loss_pct":       stop_loss_pct,
+            "target_pct":          target_pct,
+            "max_holding_days":    max_holding_days,
             "min_composite_score": min_composite_score,
-            "min_stage2_days":    min_stage2_days,
-            "max_stage2_days":    max_stage2_days,
+            "min_stage2_days":     min_stage2_days,
+            "max_stage2_days":     max_stage2_days,
+            "min_mtf_score":       min_mtf_score,
         }
 
         logger.info(
             "Backtest started | signal=%s | %s→%s | stop=%.0f%% | target=%.0f%% "
-            "| hold=%dd | s2d=[%s,%s]",
+            "| hold=%dd | s2d=[%s,%s] | mtf>=%s",
             entry_signal, start_date, end_date,
             stop_loss_pct * 100, target_pct * 100, max_holding_days,
             min_stage2_days or "—", max_stage2_days or "—",
+            min_mtf_score if min_mtf_score is not None else "—",
         )
 
         # ── 1. Load entry signals ─────────────────────────────────────────────
@@ -138,6 +145,7 @@ class BacktestEngine:
             min_composite_score=min_composite_score,
             min_stage2_days=min_stage2_days,
             max_stage2_days=max_stage2_days,
+            min_mtf_score=min_mtf_score,
         )
 
         if entries.empty:

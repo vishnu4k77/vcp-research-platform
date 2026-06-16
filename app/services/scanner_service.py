@@ -331,7 +331,11 @@ class ScannerService:
                 ISNULL(pas.pa_signal,         0)   AS pa_signal,
                 ISNULL(pas.pa_hh_daily,       0)   AS pa_daily_trend,
                 ISNULL(pas.pa_hh_weekly,      0)   AS pa_weekly_trend,
-                ISNULL(pas.pa_score,          0.0) AS pa_score
+                ISNULL(pas.pa_score,          0.0) AS pa_score,
+                -- MTF signals (0 when run_mtf_pipeline.py has not yet run for this date)
+                ISNULL(smtf.mtf_weekly_trend,  0)  AS mtf_weekly_trend,
+                ISNULL(smtf.mtf_monthly_trend, 0)  AS mtf_monthly_trend,
+                ISNULL(smtf.mtf_score,         0)  AS mtf_score
             FROM stock_signals ss
             LEFT JOIN nse_universe nu
                 ON nu.symbol = REPLACE(ss.symbol, :nse_suffix, '')
@@ -343,6 +347,9 @@ class ScannerService:
             LEFT JOIN stock_pa_signals pas
                 ON  pas.symbol     = ss.symbol
                 AND pas.trade_date = ss.trade_date
+            LEFT JOIN stock_mtf_signals smtf
+                ON  smtf.symbol     = ss.symbol
+                AND smtf.trade_date = ss.trade_date
             {index_join}
             WHERE ss.trade_date    = :trade_date
               AND ss.composite_score >= :min_score

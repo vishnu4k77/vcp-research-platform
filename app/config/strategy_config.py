@@ -258,6 +258,14 @@ class BacktestConfig:
     # Entry quality filter — only entries whose composite_score meets this threshold
     MIN_COMPOSITE_SCORE: float = 50.0
 
+    # MTF filter — minimum mtf_score (0-2) required on the entry date.
+    # Passed as min_mtf_score to BacktestEngine.run(). None = no filter.
+    #   0 / None : all entries accepted regardless of macro trend
+    #   1        : at least one timeframe (weekly OR monthly) must be in uptrend
+    #   2        : both weekly AND monthly must confirm uptrend (highest conviction)
+    # Requires stock_mtf_signals populated by scripts/run_mtf_pipeline.py.
+    MTF_FILTER_SCORE: int = 2
+
     # How many calendar days beyond end_date to load forward price data
     # (ensures trades opened near end_date still get complete exit simulation).
     FORWARD_PRICE_BUFFER_DAYS: int = 120
@@ -655,6 +663,53 @@ class PriceActionConfig:
 
     # ── SQL batch size for stock_pa_signals inserts ───────────────────────────
     PA_SQL_BATCH_SIZE: int = 1000
+
+
+class MTFConfig:
+    """Multi-Timeframe (MTF) trend alignment — weekly + monthly EMA structure.
+
+    Resample existing daily stock_features close prices to weekly and monthly
+    bars, compute EMA pairs on each, then emit BIT signals + a 0-2 composite
+    score per trading day.
+
+    Signal logic (both timeframes use the same pattern):
+        trend = 1  when  close > ema_fast  AND  ema_fast > ema_slow
+        trend = 0  otherwise
+
+    Weekly benchmark: Weinstein Stage 2 uses the 30-week MA as the critical
+        boundary.  EMA10 weekly acts as the fast signal line.
+    Monthly benchmark: Minervini / O'Neil use the 40-week (≈ 10-month) EMA as
+        the primary trend line.  EMA21 monthly is the secular trend filter.
+
+    All parameters tunable here — zero code changes needed for recalibration.
+    """
+
+    # ── Weekly timeframe ──────────────────────────────────────────────────────
+    # Resample frequency — NSE weeks end Friday
+    MTF_WEEKLY_FREQ: str = "W-FRI"
+
+    # EMA periods applied to weekly close prices
+    MTF_WEEKLY_EMA_FAST: int = 10   # 10-week EMA  (fast signal line)
+    MTF_WEEKLY_EMA_SLOW: int = 30   # 30-week EMA  (Weinstein Stage 2 boundary)
+
+    # Minimum completed weekly bars required before emitting a weekly signal.
+    # Below this the EMA has insufficient history and would be unreliable.
+    MTF_MIN_WEEKLY_BARS: int = 52   # ~1 year of weekly data
+
+    # ── Monthly timeframe ─────────────────────────────────────────────────────
+    # Resample frequency — month end
+    MTF_MONTHLY_FREQ: str = "ME"    # month end (canonical alias; mtf_feature.py resolves for older pandas)
+
+    # EMA periods applied to monthly close prices
+    MTF_MONTHLY_EMA_FAST: int = 10  # 10-month EMA (Minervini/O'Neil primary trend)
+    MTF_MONTHLY_EMA_SLOW: int = 21  # 21-month EMA (secular long-term trend)
+
+    # Minimum completed monthly bars before emitting a monthly signal
+    MTF_MIN_MONTHLY_BARS: int = 24  # ~2 years of monthly data
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+    # SQL bulk-insert batch size for stock_mtf_signals
+    MTF_SQL_BATCH_SIZE: int = 1000
 
 
 class ScannerQueryConfig:

@@ -61,6 +61,7 @@ class BacktestService:
         min_composite_score: float,
         min_stage2_days: Optional[int] = None,
         max_stage2_days: Optional[int] = None,
+        min_mtf_score: Optional[int] = None,
     ) -> pd.DataFrame:
         """Return all entry-signal rows in [start_date, end_date] with their entry prices.
 
@@ -81,6 +82,11 @@ class BacktestService:
             min_composite_score: Only include rows where composite_score >= this.
             min_stage2_days: Minimum days in current Stage 2 run (None = no lower bound).
             max_stage2_days: Maximum days in current Stage 2 run (None = no upper bound).
+            min_mtf_score:  Minimum mtf_score from stock_mtf_signals (0-2).
+                             None = no filter (all entries regardless of macro trend).
+                             1 = at least one timeframe aligned.
+                             2 = both weekly AND monthly must confirm uptrend.
+                             Requires stock_mtf_signals populated by run_mtf_pipeline.py.
 
         Returns:
             DataFrame with columns:
@@ -102,6 +108,7 @@ class BacktestService:
             "min_score":  min_composite_score,
             "min_s2d":    min_stage2_days,
             "max_s2d":    max_stage2_days,
+            "min_mtf":    min_mtf_score,
         }
 
         if entry_signal == "pa_signal":
@@ -130,11 +137,15 @@ class BacktestService:
                     AND me.market_state <> 'DEFENSIVE'
                 LEFT JOIN market_regime mr
                     ON  mr.trade_date  = ps.trade_date
+                LEFT JOIN stock_mtf_signals smtf
+                    ON  smtf.symbol     = ps.symbol
+                    AND smtf.trade_date = ps.trade_date
                 WHERE ps.trade_date      BETWEEN :start_date AND :end_date
                   AND ps.pa_signal        = 1
                   AND ss.composite_score  >= :min_score
                   AND (:min_s2d IS NULL OR ss.stage2_days >= :min_s2d)
                   AND (:max_s2d IS NULL OR ss.stage2_days <= :max_s2d)
+                  AND (:min_mtf IS NULL OR ISNULL(smtf.mtf_score, 0) >= :min_mtf)
                 ORDER BY ps.trade_date ASC, ps.symbol ASC
             """)
 
@@ -166,12 +177,16 @@ class BacktestService:
                     AND me.market_state <> 'DEFENSIVE'
                 LEFT JOIN market_regime mr
                     ON  mr.trade_date  = ss.trade_date
+                LEFT JOIN stock_mtf_signals smtf
+                    ON  smtf.symbol     = ss.symbol
+                    AND smtf.trade_date = ss.trade_date
                 WHERE ss.trade_date      BETWEEN :start_date AND :end_date
                   AND ss.breakout_signal  = 1
                   AND ps.pa_signal        = 1
                   AND ss.composite_score  >= :min_score
                   AND (:min_s2d IS NULL OR ss.stage2_days >= :min_s2d)
                   AND (:max_s2d IS NULL OR ss.stage2_days <= :max_s2d)
+                  AND (:min_mtf IS NULL OR ISNULL(smtf.mtf_score, 0) >= :min_mtf)
                 ORDER BY ss.trade_date ASC, ss.symbol ASC
             """)
 
@@ -191,11 +206,15 @@ class BacktestService:
                     AND dpd.trade_date = ss.trade_date
                 LEFT JOIN market_regime mr
                     ON  mr.trade_date  = ss.trade_date
+                LEFT JOIN stock_mtf_signals smtf
+                    ON  smtf.symbol     = ss.symbol
+                    AND smtf.trade_date = ss.trade_date
                 WHERE ss.trade_date        BETWEEN :start_date AND :end_date
                   AND ss.{entry_signal}    = 1
                   AND ss.composite_score   >= :min_score
                   AND (:min_s2d IS NULL OR ss.stage2_days >= :min_s2d)
                   AND (:max_s2d IS NULL OR ss.stage2_days <= :max_s2d)
+                  AND (:min_mtf IS NULL OR ISNULL(smtf.mtf_score, 0) >= :min_mtf)
                 ORDER BY ss.trade_date ASC, ss.symbol ASC
             """)
 
@@ -203,9 +222,11 @@ class BacktestService:
             with nolock_connect() as conn:
                 df = pd.read_sql(query, conn, params=params)
             logger.info(
-                "Signal entries loaded | signal=%s | %s→%s | s2d=[%s,%s] | rows=%d",
+                "Signal entries loaded | signal=%s | %s→%s | s2d=[%s,%s] | mtf>=%s | rows=%d",
                 entry_signal, start_date, end_date,
-                min_stage2_days or "—", max_stage2_days or "—", len(df),
+                min_stage2_days or "—", max_stage2_days or "—",
+                min_mtf_score if min_mtf_score is not None else "—",
+                len(df),
             )
             return df
         except Exception as exc:

@@ -1,15 +1,25 @@
-"""run_backtest_comparison.py — side-by-side backtest of all three signal strategies.
+"""run_backtest_comparison.py — side-by-side backtest of six signal strategies.
 
-Runs Composite (Default), Price Action, and Combined PA+EMA over the same date
-range and parameters, then prints a detailed comparison table.
+Runs all six strategies over the same date range and parameters, then prints a
+detailed comparison table to prove whether MTF confirmation improves win rate.
 
 All numbers come from real DB data — zero fabricated statistics.
 
+Strategies compared
+-------------------
+    1. Composite (baseline)    — breakout_signal, no MTF filter
+    2. Breakout MTF>=1         — breakout_signal, at least one TF aligned
+    3. Breakout MTF=2          — breakout_signal, weekly AND monthly aligned
+    4. VCP MTF=2               — vcp_signal, weekly AND monthly aligned
+    5. Price Action            — pa_signal, no MTF filter
+    6. Combined PA+EMA         — breakout_signal AND pa_signal, no MTF filter
+
 Prerequisites
 -------------
-    python setup_db.py                  # stock_pa_signals table must exist
-    python scripts/run_pa_pipeline.py   # populate stock_pa_signals
-    python run.py                       # stock_signals must be populated
+    python setup_db.py                    # creates all tables (stock_mtf_signals)
+    python run.py                         # populate stock_signals
+    python scripts/run_pa_pipeline.py     # populate stock_pa_signals
+    python scripts/run_mtf_pipeline.py    # populate stock_mtf_signals
 
 Usage
 -----
@@ -28,6 +38,7 @@ import argparse
 import sys
 from datetime import date, datetime
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -38,11 +49,14 @@ from app.config.strategy_config import BacktestConfig
 
 logger = get_logger("run_backtest_comparison")
 
-# Three strategies compared — in display order
-_STRATEGIES: list[tuple[str, str]] = [
-    ("Composite (Default)", "breakout_signal"),
-    ("Price Action",        "pa_signal"),
-    ("Combined PA+EMA",     "combined_pa_ema"),
+# Six strategies compared — in display order (name, signal, min_mtf_score)
+_STRATEGIES: list[tuple[str, str, Optional[int]]] = [
+    ("Composite",       "breakout_signal",  None),  # baseline — no MTF gate
+    ("Breakout MTF>=1", "breakout_signal",  1),      # at least one TF aligned
+    ("Breakout MTF=2",  "breakout_signal",  2),      # both TFs aligned
+    ("VCP MTF=2",       "vcp_signal",       2),      # VCP-specific with full MTF
+    ("Price Action",    "pa_signal",        None),   # PA standalone
+    ("Combined PA+EMA", "combined_pa_ema",  None),   # PA + breakout_signal
 ]
 
 
@@ -58,10 +72,14 @@ def _build_parser() -> argparse.ArgumentParser:
         description="NSE VCP Scanner — Strategy Comparison Backtest",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Compares:\n"
-            "  1. Composite (Default)  — breakout_signal\n"
-            "  2. Price Action         — pa_signal (run run_pa_pipeline.py first)\n"
-            "  3. Combined PA+EMA      — breakout_signal AND pa_signal\n"
+            "Compares 6 strategies:\n"
+            "  1. Composite       — breakout_signal, no MTF filter\n"
+            "  2. Breakout MTF>=1 — breakout_signal, 1+ timeframe aligned\n"
+            "  3. Breakout MTF=2  — breakout_signal, weekly AND monthly\n"
+            "  4. VCP MTF=2       — vcp_signal, weekly AND monthly\n"
+            "  5. Price Action    — pa_signal (run run_pa_pipeline.py first)\n"
+            "  6. Combined PA+EMA — breakout_signal AND pa_signal\n"
+            "\nRequires run_mtf_pipeline.py for strategies 2-4."
         ),
     )
     parser.add_argument("--start", type=_parse_date, default=None, metavar="YYYY-MM-DD")
@@ -85,8 +103,11 @@ def _fmt_pf(pf: float) -> str:
 
 
 def _print_comparison(results: list[tuple[str, dict]], params: dict) -> None:
-    sep  = "=" * 70
-    sep2 = "-" * 70
+    col_w   = 16
+    label_w = 20
+    total_w = label_w + col_w * len(results)
+    sep  = "=" * total_w
+    sep2 = "-" * total_w
 
     print(f"\n{sep}")
     print("  NSE VCP Scanner — Strategy Comparison Backtest")
@@ -100,8 +121,6 @@ def _print_comparison(results: list[tuple[str, dict]], params: dict) -> None:
     print(sep)
 
     # ── Summary header ───────────────────────────────────────────────────────
-    col_w = 22
-    label_w = 22
     header = f"{'Metric':<{label_w}}" + "".join(f"{name:>{col_w}}" for name, _ in results)
     print(header)
     print(sep2)
@@ -189,8 +208,9 @@ def main() -> int:
 
     results: list[tuple[str, dict]] = []
 
-    for display_name, signal in _STRATEGIES:
-        print(f"  Running: {display_name} ({signal}) ...", flush=True)
+    for display_name, signal, min_mtf in _STRATEGIES:
+        mtf_label = f" mtf>={min_mtf}" if min_mtf is not None else ""
+        print(f"  Running: {display_name} ({signal}{mtf_label}) ...", flush=True)
         try:
             result = BacktestEngine.run(
                 start_date          = start_date,
@@ -200,11 +220,12 @@ def main() -> int:
                 target_pct          = target_pct,
                 max_holding_days    = args.hold,
                 min_composite_score = args.min_score,
+                min_mtf_score       = min_mtf,
             )
             results.append((display_name, result.metrics))
 
             if args.out and not result.is_empty:
-                safe_name = signal.replace("_", "-")
+                safe_name = display_name.lower().replace(" ", "-").replace(">=", "gte").replace("=", "eq")
                 out_path  = args.out.parent / f"{args.out.stem}_{safe_name}{args.out.suffix}"
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 result.trades.to_csv(out_path, index=False)
