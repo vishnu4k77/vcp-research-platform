@@ -286,6 +286,8 @@ _SIGNAL_COLUMNS = [
     "pa_signal",           # price action — populated by run_pa_pipeline.py
     "mtf_weekly_trend",    # weekly EMA uptrend — populated by run_mtf_pipeline.py
     "mtf_monthly_trend",   # monthly EMA uptrend — populated by run_mtf_pipeline.py
+    "rs_new_high",         # 52-week RS new high — sustained outperformer signal
+    "minervini_signal",    # all 8 Minervini Trend Template conditions met
 ]
 
 _DISPLAY_NAMES: dict[str, str] = {
@@ -330,6 +332,9 @@ _DISPLAY_NAMES: dict[str, str] = {
     "mtf_weekly_trend":            "W Trend",
     "mtf_monthly_trend":           "M Trend",
     "mtf_score":                   "MTF",
+    "rs_new_high":                 "RS Hi",
+    "minervini_signal":            "Minervini",
+    "trend_health":                "Strength",
     "fund_quality_score":          "Fund Score",
     "fund_promoter_pct":           "Promoter%",
     "fund_roe":                    "ROE%",
@@ -493,6 +498,63 @@ def _style_stage(val) -> str:
     """Color position_stage chip."""
     color = _STAGE_COLORS.get(str(val).strip(), TEXT_MUTED)
     return f"color: {color}; font-weight: 600"
+
+
+# Trend health: priority-ranked labels for daily profit-booking decisions.
+# ROCKET — hold maximum, full macro confirmation + RS at new high
+# STRONG  — hold, both timeframes aligned and RS beating Nifty
+# TREND   — hold/watch, at least one higher timeframe aligned
+# COOL    — book partial (T1), daily trend intact but higher TFs weakening
+# EXIT    — book all / exit, daily EMA stack broken
+_TREND_HEALTH_COLORS: dict[str, str] = {
+    "ROCKET": GREEN,
+    "STRONG": GREEN,
+    "TREND":  BLUE,
+    "COOL":   ORANGE,
+    "EXIT":   RED,
+}
+
+
+def _compute_trend_health(df: "pd.DataFrame") -> "pd.Series":
+    """Derive a Trend Health label from existing signal columns (no DB round-trip).
+
+    Args:
+        df: Raw scanner DataFrame with signal columns.
+
+    Returns:
+        Series of str labels: ROCKET / STRONG / TREND / COOL / EXIT.
+    """
+    trend   = pd.to_numeric(df.get("trend_signal",  0), errors="coerce").fillna(0).astype(int)
+    mtf     = pd.to_numeric(df.get("mtf_score",     0), errors="coerce").fillna(0).astype(int)
+    rs      = pd.to_numeric(df.get("rs_signal",     0), errors="coerce").fillna(0).astype(int)
+    rs_hi   = pd.to_numeric(df.get("rs_new_high",   0), errors="coerce").fillna(0).astype(int)
+
+    return pd.Series(
+        np.select(
+            [
+                (trend == 1) & (mtf == 2) & (rs_hi == 1) & (rs == 1),  # ROCKET
+                (trend == 1) & (mtf == 2) & (rs == 1),                  # STRONG
+                (trend == 1) & (mtf >= 1),                               # TREND
+                (trend == 1),                                             # COOL
+            ],
+            ["ROCKET", "STRONG", "TREND", "COOL"],
+            default="EXIT",
+        ),
+        index=df.index,
+    )
+
+
+def _style_trend_health(val) -> str:
+    """Color Strength chip by trend health category.
+
+    Args:
+        val: One of ROCKET / STRONG / TREND / COOL / EXIT.
+
+    Returns:
+        CSS string for Pandas Styler.
+    """
+    color = _TREND_HEALTH_COLORS.get(str(val).strip(), TEXT_MUTED)
+    return f"color: {color}; font-weight: 700"
 
 
 # ── Regime badge ─────────────────────────────────────────────────────────────
@@ -871,6 +933,9 @@ def render_scanner_table() -> None:
             pd.to_numeric(df["trailing_stop_price"], errors="coerce"),
         ).round(2)
 
+    # ── Trend Health — daily hold vs profit-booking decision ─────────────────
+    df["trend_health"] = _compute_trend_health(df)
+
     # ── Build display DataFrame ───────────────────────────────────────────────
     # Core columns always shown (stage2_started_date excluded — too wide for table view)
     # fundamental columns appended when data exists
@@ -977,6 +1042,9 @@ def render_scanner_table() -> None:
     mtf_score_col = _DISPLAY_NAMES.get("mtf_score", "MTF")
     if mtf_score_col in display.columns:
         styled = styled.map(_style_mtf_score, subset=[mtf_score_col])
+    strength_col = _DISPLAY_NAMES.get("trend_health", "Strength")
+    if strength_col in display.columns:
+        styled = styled.map(_style_trend_health, subset=[strength_col])
     styled = styled.format(fmt, na_rep="—")
 
     # Fixed widths force overflow → draggable horizontal scrollbar.
@@ -1009,6 +1077,9 @@ def render_scanner_table() -> None:
         "W Trend":       st.column_config.NumberColumn(format="%d",      width=68),
         "M Trend":       st.column_config.NumberColumn(format="%d",      width=68),
         "MTF":           st.column_config.NumberColumn(format="%d",      width=52),
+        "RS Hi":         st.column_config.NumberColumn(format="%d",      width=55),
+        "Minervini":     st.column_config.NumberColumn(format="%d",      width=75),
+        "Strength":      st.column_config.TextColumn(width=72),
         "Fund Score":    st.column_config.NumberColumn(format="%.1f",    width=82),
         "Promoter%":   st.column_config.NumberColumn(format="%.1f%%",  width=88),
         "ROE%":        st.column_config.NumberColumn(format="%.1f%%",  width=65),

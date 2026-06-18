@@ -303,6 +303,8 @@ class ScannerService:
                 ss.liquidity_signal,
                 ss.quality_signal,
                 ss.rs_signal,
+                ISNULL(ss.rs_new_high,       0) AS rs_new_high,
+                ISNULL(ss.minervini_signal,  0) AS minervini_signal,
                 ss.distance_from_pivot_pct,
                 ss.distance_from_52w_high_pct,
                 ss.stage2_days,

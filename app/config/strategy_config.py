@@ -455,6 +455,18 @@ class DashboardConfig:
             "liquidity_signal":  5,
             "breakout_signal":   5,
         },
+
+        # Trend Continuation: for daily profit-booking decisions on existing positions.
+        # Ranks stocks where the macro uptrend is strongest and RS is at a new high —
+        # these are stocks to HOLD. Low scores = consider booking profit.
+        # rs_new_high (52w RS new high) = sustained outperformer; highest weight.
+        "Trend Continuation": {
+            "rs_new_high":      35,
+            "rs_signal":        25,
+            "minervini_signal": 20,
+            "trend_signal":     10,
+            "stage2_signal":    10,
+        },
     }
 
 
