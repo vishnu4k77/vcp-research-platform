@@ -557,11 +557,17 @@ class ScannerService:
                 ss.breakout_signal, ss.breakout_ready_signal,
                 ss.liquidity_signal, ss.quality_signal, ss.rs_signal,
                 ss.distance_from_pivot_pct, ss.distance_from_52w_high_pct,
-                ss.stage2_days, ss.stage2_started_date
+                ss.stage2_days, ss.stage2_started_date,
+                ISNULL(smtf.mtf_weekly_trend,  0) AS mtf_weekly_trend,
+                ISNULL(smtf.mtf_monthly_trend, 0) AS mtf_monthly_trend,
+                ISNULL(smtf.mtf_score,         0) AS mtf_score
             FROM stock_features sf
             LEFT JOIN stock_signals ss
-                ON sf.symbol    = ss.symbol
+                ON  sf.symbol     = ss.symbol
                 AND sf.trade_date = ss.trade_date
+            LEFT JOIN stock_mtf_signals smtf
+                ON  smtf.symbol     = sf.symbol
+                AND smtf.trade_date = sf.trade_date
             WHERE sf.symbol = :symbol
             ORDER BY sf.trade_date DESC
         """)

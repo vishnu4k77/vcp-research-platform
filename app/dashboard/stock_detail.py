@@ -459,6 +459,8 @@ def render_stock_detail() -> None:
         "Liquidity": "liquidity_signal",
         "Quality":   "quality_signal",
         "RS":        "rs_signal",
+        "W Trend":   "mtf_weekly_trend",
+        "M Trend":   "mtf_monthly_trend",
     }
 
     sig_cols = st.columns(len(signal_map))
@@ -557,9 +559,18 @@ def render_stock_detail() -> None:
     score_val  = latest.get("composite_score")
     dist_pivot = latest.get("distance_from_pivot_pct")
     dist_52w   = latest.get("distance_from_52w_high_pct")
+    mtf_score  = latest.get("mtf_score")
 
     score_colour = GREEN if (score_val or 0) >= 70 else (BLUE if (score_val or 0) >= 50 else RED)
-    m1, m2, m3 = st.columns(3)
+
+    try:
+        mtf_int = int(mtf_score) if mtf_score is not None else 0
+    except (TypeError, ValueError):
+        mtf_int = 0
+    mtf_colour = GREEN if mtf_int >= 2 else (ORANGE if mtf_int == 1 else RED)
+    mtf_label_str = {2: "2 / 2  ✓✓", 1: "1 / 2  ✓", 0: "0 / 2  ✗"}.get(mtf_int, "—")
+
+    m1, m2, m3, m4 = st.columns(4)
     with m1:
         st.markdown(
             metric_card("Composite Score", f"{score_val:.1f}" if score_val is not None else "—", score_colour),
@@ -573,6 +584,11 @@ def render_stock_detail() -> None:
     with m3:
         st.markdown(
             metric_card("Dist from 52w High", f"{dist_52w:.1f}%" if dist_52w is not None else "—"),
+            unsafe_allow_html=True,
+        )
+    with m4:
+        st.markdown(
+            metric_card("MTF Score (W+M)", mtf_label_str, mtf_colour),
             unsafe_allow_html=True,
         )
 
