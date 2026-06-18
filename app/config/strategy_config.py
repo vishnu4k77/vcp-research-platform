@@ -952,3 +952,72 @@ class ScannerQueryConfig:
             ),
         },
     ]
+
+
+class MLConfig:
+    """ML model configuration — LightGBM breakout success predictor.
+
+    All hyperparameters, file paths, and thresholds live here.
+    The model is trained by scripts/train_breakout_model.py (one-time or periodic)
+    and scored daily by MLPipeline (Step 11 of MasterPipeline).
+
+    Feature columns must match columns returned by
+    BacktestService.get_entry_features_for_training() and
+    MLPipeline._get_today_features().
+    """
+
+    import os
+    from pathlib import Path as _Path
+
+    # Directory where trained model files are stored.
+    # Override via VCP_MODEL_DIR env variable when running on a server.
+    MODEL_DIR: "MLConfig._Path" = _Path(os.environ.get("VCP_MODEL_DIR", "models"))
+    BREAKOUT_MODEL_FILE: str = "breakout_predictor_v1.joblib"
+
+    # Features fed to the model (must exist in both training and inference queries).
+    FEATURE_COLUMNS: list = [
+        "composite_score",
+        "stage2_days",
+        "stage2_signal",
+        "trend_signal",
+        "vcp_signal",
+        "rs_signal",
+        "minervini_signal",
+        "quality_signal",
+        "liquidity_signal",
+        "pa_score",
+        "mtf_score",
+        "regime_score",
+        "distance_from_pivot_pct",
+        "base_range_pct",
+    ]
+
+    # Win label definition: 1 if the backtest trade hit the profit target.
+    WIN_EXIT_REASON: str = "TARGET"
+
+    # LightGBM hyperparameters — tune here, not in model code.
+    N_ESTIMATORS: int = 400
+    MAX_DEPTH: int = 5
+    LEARNING_RATE: float = 0.04
+    MIN_CHILD_SAMPLES: int = 15
+    SUBSAMPLE: float = 0.80
+    COLSAMPLE_BYTREE: float = 0.80
+    N_JOBS: int = -1
+    RANDOM_STATE: int = 42
+
+    # Training
+    MIN_TRAINING_SAMPLES: int = 50   # below this: warn and abort training
+    TEST_SIZE: float = 0.20          # fraction held out for evaluation
+
+    # Inference
+    ML_SIGNAL_THRESHOLD: float = 0.60   # ml_win_prob ≥ this → ml_signal = 1
+    ML_SCORE_COLUMN: str = "ml_win_prob"
+    ML_SIGNAL_COLUMN: str = "ml_signal"
+    ML_BATCH_SIZE: int = 500
+
+    # Labeler defaults used by train_breakout_model.py
+    LABELER_SIGNAL: str = "breakout_signal"
+    LABELER_STOP_PCT: float = 0.07
+    LABELER_TARGET_PCT: float = 0.20
+    LABELER_MAX_HOLDING_DAYS: int = 60
+    LABELER_MIN_COMPOSITE_SCORE: float = 40.0

@@ -13,6 +13,7 @@ from app.signals.signal_pipeline import SignalPipeline
 from app.sector.sector_momentum import SectorMomentum
 from app.pipeline.pa_pipeline import PAPipeline
 from app.pipeline.mtf_pipeline import MTFPipeline
+from app.ml.ml_pipeline import MLPipeline
 
 logger = get_logger(__name__)
 
@@ -227,6 +228,21 @@ class MasterPipeline:
             logger.warning("── Step [mtf_pipeline] failed (non-blocking): %s", exc)
             context.add_warning(f"MTF pipeline failed: {exc}")
             context.mark_step_completed("mtf_pipeline")
+
+        # ── Step 10: ML pipeline (non-blocking) ───────────────────────────────
+        # Loads trained BreakoutPredictor model → scores today's signal candidates
+        # with P(breakout hits target) → writes ml_win_prob + ml_signal to
+        # stock_ml_scores.  Silently skipped if model file not yet trained.
+        # Run scripts/train_breakout_model.py once to enable this step.
+        logger.info("── Step [ml_pipeline] starting")
+        try:
+            MLPipeline.run()
+            context.mark_step_completed("ml_pipeline")
+            logger.info("── Step [ml_pipeline] completed")
+        except Exception as exc:
+            logger.warning("── Step [ml_pipeline] failed (non-blocking): %s", exc)
+            context.add_warning(f"ML pipeline failed: {exc}")
+            context.mark_step_completed("ml_pipeline")
 
         return MasterPipeline._finalize(context)
 

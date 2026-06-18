@@ -27,6 +27,15 @@ _VALID_ENTRY_SIGNALS: frozenset[str] = frozenset(BacktestConfig.ENTRY_SIGNAL_OPT
 # These require a different SQL query that JOINs stock_pa_signals.
 _PA_SIGNAL_TYPES: frozenset[str] = BacktestConfig.PA_SIGNAL_TYPES
 
+# Columns valid for direct interpolation into SQL WHERE clauses.
+# Used by get_entry_features_for_training() whitelist check.
+VALID_SIGNAL_COLUMNS: frozenset[str] = frozenset({
+    "breakout_signal",
+    "vcp_signal",
+    "breakout_ready_signal",
+    "pa_signal",
+})
+
 
 class BacktestService:
     """Read-only SQL queries for the backtesting engine.
@@ -309,3 +318,94 @@ class BacktestService:
             len(symbols), from_date, to_date, len(result_df),
         )
         return result_df
+
+    @staticmethod
+    def get_entry_features_for_training(
+        start_date: date,
+        end_date: date,
+        entry_signal: str,
+        min_composite_score: float,
+    ) -> pd.DataFrame:
+        """Fetch rich feature set for ML training — signals + MTF + PA + regime.
+
+        Returns one row per (symbol, trade_date) where entry_signal = 1 in
+        the given date range.  Joins stock_mtf_signals, stock_pa_signals, and
+        market_regime so the training data includes regime context.
+
+        entry_signal is validated against _VALID_ENTRY_SIGNALS before any SQL
+        interpolation (whitelist = injection safety guarantee).
+
+        Args:
+            start_date: First date to include.
+            end_date: Last date to include.
+            entry_signal: Signal column name (must be in BacktestConfig.ENTRY_SIGNAL_OPTIONS).
+            min_composite_score: Minimum composite_score gate.
+
+        Returns:
+            DataFrame with columns matching MLConfig.FEATURE_COLUMNS + trade_date.
+            Empty DataFrame on error or no data.
+
+        Raises:
+            ValueError: If entry_signal is not in the whitelist.
+        """
+        # Use breakout_signal for combined_pa_ema (same entry gate for feature fetch)
+        signal_col = "breakout_signal" if entry_signal == "combined_pa_ema" else entry_signal
+        # Validate whitelisted column names before interpolation
+        if signal_col not in VALID_SIGNAL_COLUMNS:
+            raise ValueError(
+                f"Invalid entry_signal '{entry_signal}' for feature fetch. "
+                f"Must be one of: {sorted(_valid_cols)}"
+            )
+
+        query = text(f"""
+            SELECT
+                ss.symbol,
+                ss.trade_date,
+                ss.composite_score,
+                ISNULL(ss.stage2_days,              0)    AS stage2_days,
+                CAST(ss.stage2_signal    AS INT)          AS stage2_signal,
+                CAST(ss.trend_signal     AS INT)          AS trend_signal,
+                CAST(ss.vcp_signal       AS INT)          AS vcp_signal,
+                CAST(ss.rs_signal        AS INT)          AS rs_signal,
+                CAST(ss.minervini_signal AS INT)          AS minervini_signal,
+                CAST(ss.quality_signal   AS INT)          AS quality_signal,
+                CAST(ss.liquidity_signal AS INT)          AS liquidity_signal,
+                ISNULL(ss.distance_from_pivot_pct, 0.0)  AS distance_from_pivot_pct,
+                ISNULL(ss.base_range_pct,          0.0)  AS base_range_pct,
+                ISNULL(smtf.mtf_score,             0)    AS mtf_score,
+                ISNULL(pas.pa_score,               0.0)  AS pa_score,
+                ISNULL(mr.regime_score,            50.0) AS regime_score
+            FROM stock_signals ss
+            LEFT JOIN stock_mtf_signals smtf
+                ON  smtf.symbol     = ss.symbol
+                AND smtf.trade_date = ss.trade_date
+            LEFT JOIN stock_pa_signals pas
+                ON  pas.symbol     = ss.symbol
+                AND pas.trade_date = ss.trade_date
+            LEFT JOIN market_regime mr
+                ON  mr.trade_date  = ss.trade_date
+            WHERE ss.trade_date       BETWEEN :start_date AND :end_date
+              AND ss.{signal_col}     = 1
+              AND ss.composite_score >= :min_score
+            ORDER BY ss.trade_date ASC, ss.symbol ASC
+        """)
+        try:
+            with nolock_connect() as conn:
+                df = pd.read_sql(
+                    query, conn,
+                    params={
+                        "start_date": start_date,
+                        "end_date":   end_date,
+                        "min_score":  min_composite_score,
+                    },
+                )
+            logger.info(
+                "get_entry_features_for_training: %d rows | signal=%s | %s→%s",
+                len(df), entry_signal, start_date, end_date,
+            )
+            return df
+        except Exception as exc:
+            logger.error(
+                "get_entry_features_for_training failed: %s", exc, exc_info=True
+            )
+            return pd.DataFrame()

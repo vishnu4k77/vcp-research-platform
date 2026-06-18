@@ -94,9 +94,19 @@ class IndexRegime:
                 )
                 return pd.DataFrame()
 
-            df = raw[[date_col, "Close"]].copy()
-            df.columns = ["trade_date", "close"]
+            # Include Volume for Phase 2 distribution-day and FTD computation.
+            vol_col = "Volume" if "Volume" in raw.columns else None
+            cols = [date_col, "Close"] + ([vol_col] if vol_col else [])
+            df = raw[cols].copy()
+            new_names = ["trade_date", "close"] + (["volume"] if vol_col else [])
+            df.columns = new_names
+
             df["close"] = pd.to_numeric(df["close"], errors="coerce")
+            if "volume" in df.columns:
+                df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+            else:
+                df["volume"] = 0.0  # fallback — Phase 2 breadth will degrade gracefully
+
             df.dropna(subset=["close"], inplace=True)
             df.sort_values("trade_date", inplace=True)
             df.reset_index(drop=True, inplace=True)
@@ -241,11 +251,16 @@ class IndexRegime:
 
     @staticmethod
     def detect() -> Optional[RegimeResult]:
-        """
-        Entry point: fetches Nifty 50 data and returns the current regime.
-        Returns None on data fetch failure or insufficient history.
-        """
+        """Entry point: fetches Nifty 50 data and returns the current regime.
 
+        Phase 2 breadth fields (breadth_positive, distribution_count,
+        follow_through_day, vix_risk_off) are computed here and attached
+        to the RegimeResult.  Each field falls back gracefully to None if
+        data is unavailable — RegimePipeline persists None as SQL NULL.
+
+        Returns:
+            RegimeResult for today, or None on data fetch failure.
+        """
         df = IndexRegime._fetch_nifty()
 
         if df.empty:
@@ -253,16 +268,35 @@ class IndexRegime:
 
         result = IndexRegime._classify(df)
 
-        if result:
+        if result is None:
+            return None
+
+        logger.info(
+            "Regime detected | %s | score=%.0f | Nifty=%.0f | "
+            "EMA50=%.0f | EMA200=%.0f | slope=%.2f%%",
+            result.market_status,
+            result.regime_score,
+            result.nifty_close,
+            result.ema_50,
+            result.ema_200,
+            result.ema_200_slope_pct,
+        )
+
+        # ── Phase 2 breadth indicators ────────────────────────────────────────
+        try:
+            from app.ml.regime_breadth import RegimeBreadthService
+            result.breadth_positive   = RegimeBreadthService.compute_breadth_positive(result.trade_date)
+            result.distribution_count = RegimeBreadthService.compute_distribution_count(df)
+            result.follow_through_day = RegimeBreadthService.compute_follow_through_day(df)
+            result.vix_risk_off       = RegimeBreadthService.compute_vix_risk_off(df)
             logger.info(
-                "Regime detected | %s | score=%.0f | Nifty=%.0f | "
-                "EMA50=%.0f | EMA200=%.0f | slope=%.2f%%",
-                result.market_status,
-                result.regime_score,
-                result.nifty_close,
-                result.ema_50,
-                result.ema_200,
-                result.ema_200_slope_pct,
+                "Phase 2 regime | breadth=%s | dist_days=%s | ftd=%s | vix_off=%s",
+                result.breadth_positive,
+                result.distribution_count,
+                result.follow_through_day,
+                result.vix_risk_off,
             )
+        except Exception as exc:
+            logger.warning("Phase 2 regime computation failed (non-critical): %s", exc)
 
         return result

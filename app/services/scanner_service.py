@@ -337,7 +337,10 @@ class ScannerService:
                 -- MTF signals (0 when run_mtf_pipeline.py has not yet run for this date)
                 ISNULL(smtf.mtf_weekly_trend,  0)  AS mtf_weekly_trend,
                 ISNULL(smtf.mtf_monthly_trend, 0)  AS mtf_monthly_trend,
-                ISNULL(smtf.mtf_score,         0)  AS mtf_score
+                ISNULL(smtf.mtf_score,         0)  AS mtf_score,
+                -- ML scores (NULL until scripts/train_breakout_model.py has run)
+                sml.ml_win_prob                    AS ml_win_prob,
+                ISNULL(sml.ml_signal,          0)  AS ml_signal
             FROM stock_signals ss
             LEFT JOIN nse_universe nu
                 ON nu.symbol = REPLACE(ss.symbol, :nse_suffix, '')
@@ -352,6 +355,9 @@ class ScannerService:
             LEFT JOIN stock_mtf_signals smtf
                 ON  smtf.symbol     = ss.symbol
                 AND smtf.trade_date = ss.trade_date
+            LEFT JOIN stock_ml_scores sml
+                ON  sml.symbol      = ss.symbol
+                AND sml.trade_date  = ss.trade_date
             {index_join}
             WHERE ss.trade_date    = :trade_date
               AND ss.composite_score >= :min_score

@@ -383,6 +383,28 @@ TABLE_DDL_EXTRA = {
             CONSTRAINT uq_pa_symbol_date    UNIQUE (symbol, trade_date)
         )
     """,
+
+    # ML scores — populated by MLPipeline (Step 11, non-blocking).
+    # Completely independent of stock_signals — zero disturbance to existing pipeline.
+    # scanner_service.get_scanner_data() LEFT JOINs this table so ml_win_prob
+    # appears in scanner rows; returns NULL when ML pipeline has not yet run.
+    # Truncated (current date only) and recomputed on each ML pipeline run.
+    # Run scripts/train_breakout_model.py once to create the model file first.
+    "stock_ml_scores": """
+        CREATE TABLE stock_ml_scores (
+            id                BIGINT       IDENTITY(1,1) NOT NULL,
+            symbol            VARCHAR(20)  NOT NULL,
+            trade_date        DATE         NOT NULL,
+            -- ML win probability: 0.0 – 1.0 (P(breakout hits target))
+            ml_win_prob       FLOAT        NULL,
+            -- Binary signal derived from ml_win_prob >= MLConfig.ML_SIGNAL_THRESHOLD
+            ml_signal         BIT          NOT NULL CONSTRAINT df_mlsig DEFAULT 0,
+            -- Model version tag for traceability
+            ml_model_version  VARCHAR(100) NULL,
+            CONSTRAINT pk_stock_ml_scores  PRIMARY KEY (id),
+            CONSTRAINT uq_sml_symbol_date  UNIQUE (symbol, trade_date)
+        )
+    """,
 }
 
 
@@ -411,6 +433,7 @@ REQUIRED_TABLES = [
     "saved_queries",              # user-saved scanner SQL strings from the dashboard UI
     "stock_pa_signals",           # price action signals — populated by run_pa_pipeline.py
     "stock_mtf_signals",          # multi-timeframe EMA trend signals — populated by run_mtf_pipeline.py
+    "stock_ml_scores",            # ML breakout success probability — populated by MLPipeline (Step 11)
 ]
 
 

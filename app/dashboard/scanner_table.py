@@ -288,6 +288,7 @@ _SIGNAL_COLUMNS = [
     "mtf_monthly_trend",   # monthly EMA uptrend — populated by run_mtf_pipeline.py
     "rs_new_high",         # 52-week RS new high — sustained outperformer signal
     "minervini_signal",    # all 8 Minervini Trend Template conditions met
+    "ml_signal",           # ML model binary (1 = win probability ≥ MLConfig.ML_SIGNAL_THRESHOLD)
 ]
 
 _DISPLAY_NAMES: dict[str, str] = {
@@ -334,6 +335,8 @@ _DISPLAY_NAMES: dict[str, str] = {
     "mtf_score":                   "MTF",
     "rs_new_high":                 "RS Hi",
     "minervini_signal":            "Minervini",
+    "ml_signal":                   "ML",
+    "ml_win_prob":                 "ML%",
     "trend_health":                "Strength",
     "fund_quality_score":          "Fund Score",
     "fund_promoter_pct":           "Promoter%",
@@ -555,6 +558,26 @@ def _style_trend_health(val) -> str:
     """
     color = _TREND_HEALTH_COLORS.get(str(val).strip(), TEXT_MUTED)
     return f"color: {color}; font-weight: 700"
+
+
+def _style_ml_prob(val) -> str:
+    """Color ML win probability: green ≥ 65%, orange ≥ 45%, red < 45%, muted = NULL.
+
+    Args:
+        val: ML win probability as percentage string (e.g. "72.3%") or float.
+
+    Returns:
+        CSS string for Pandas Styler.
+    """
+    try:
+        v = float(str(val).replace("%", ""))
+        if v >= 65.0:
+            return f"color: {GREEN}; font-weight: 700"
+        if v >= 45.0:
+            return f"color: {ORANGE}; font-weight: 600"
+        return f"color: {RED}"
+    except (TypeError, ValueError):
+        return f"color: {TEXT_MUTED}"
 
 
 # ── Regime badge ─────────────────────────────────────────────────────────────
@@ -933,6 +956,10 @@ def render_scanner_table() -> None:
             pd.to_numeric(df["trailing_stop_price"], errors="coerce"),
         ).round(2)
 
+    # ── ML win probability — scale 0.0-1.0 → 0-100 for display ─────────────
+    if "ml_win_prob" in df.columns:
+        df["ml_win_prob"] = pd.to_numeric(df["ml_win_prob"], errors="coerce") * 100.0
+
     # ── Trend Health — daily hold vs profit-booking decision ─────────────────
     df["trend_health"] = _compute_trend_health(df)
 
@@ -997,6 +1024,7 @@ def render_scanner_table() -> None:
         _DISPLAY_NAMES.get("trailing_stop_price","Trail Stop ₹"): "{:.1f}",
         _DISPLAY_NAMES.get("safe_exit_price",   "Safe Exit ₹"):  "{:.1f}",
         _DISPLAY_NAMES.get("mtf_score",         "MTF"):           "{:.0f}",
+        _DISPLAY_NAMES.get("ml_win_prob",        "ML%"):           "{:.0f}%",
     }
     if "fund_promoter_pct" in df.columns:
         fmt[_DISPLAY_NAMES["fund_promoter_pct"]] = "{:.1f}%"
@@ -1045,6 +1073,9 @@ def render_scanner_table() -> None:
     strength_col = _DISPLAY_NAMES.get("trend_health", "Strength")
     if strength_col in display.columns:
         styled = styled.map(_style_trend_health, subset=[strength_col])
+    ml_prob_col = _DISPLAY_NAMES.get("ml_win_prob", "ML%")
+    if ml_prob_col in display.columns:
+        styled = styled.map(_style_ml_prob, subset=[ml_prob_col])
     styled = styled.format(fmt, na_rep="—")
 
     # Fixed widths force overflow → draggable horizontal scrollbar.
@@ -1079,6 +1110,8 @@ def render_scanner_table() -> None:
         "MTF":           st.column_config.NumberColumn(format="%d",      width=52),
         "RS Hi":         st.column_config.NumberColumn(format="%d",      width=55),
         "Minervini":     st.column_config.NumberColumn(format="%d",      width=75),
+        "ML":            st.column_config.NumberColumn(format="%d",      width=42),
+        "ML%":           st.column_config.NumberColumn(format="%.0f%%",  width=58),
         "Strength":      st.column_config.TextColumn(width=72),
         "Fund Score":    st.column_config.NumberColumn(format="%.1f",    width=82),
         "Promoter%":   st.column_config.NumberColumn(format="%.1f%%",  width=88),
