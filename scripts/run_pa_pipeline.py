@@ -1,4 +1,8 @@
-"""Run the Price Action pipeline.
+"""Run the Price Action pipeline standalone.
+
+NOTE: As of the current MasterPipeline, this step runs automatically as
+Step 8 of run.py (non-blocking).  Use this script only to re-run PA signals
+without running the full pipeline (e.g. after tuning PriceActionConfig).
 
 Prerequisite: main pipeline (run.py) must have run first so stock_features
               has EMA50 and relative_volume populated.
@@ -16,7 +20,6 @@ What it does:
 After running:
     - Open scanner → "Price Action" preset shows stocks where pa_signal=1
     - Open scanner → "Combined PA+EMA" preset shows highest conviction setups
-    - Compare vs existing "Composite (Default)" to backtest PA accuracy
 """
 
 import sys

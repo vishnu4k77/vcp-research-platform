@@ -11,6 +11,8 @@ from app.features.feature_pipeline import FeaturePipeline
 from app.regime.regime_pipeline import RegimePipeline
 from app.signals.signal_pipeline import SignalPipeline
 from app.sector.sector_momentum import SectorMomentum
+from app.pipeline.pa_pipeline import PAPipeline
+from app.pipeline.mtf_pipeline import MTFPipeline
 
 logger = get_logger(__name__)
 
@@ -20,12 +22,21 @@ class MasterPipeline:
     End-to-end EOD pipeline coordinator.
 
     Execution order:
-      1. Ingestion  — pulls incremental OHLCV from Yahoo Finance
-      2. Features   — computes all technical indicators
-      3. Regime     — detects Nifty 50 Bull/Bear/Choppy regime
-      4. Signals    — runs pattern detectors + composite ranker
+      1. Ingestion         — pulls incremental OHLCV from Yahoo Finance
+      2. Data quality      — stale row detection and gap remediation
+      3. Earnings refresh  — refreshes is_earnings_day flag (non-blocking)
+      4. Features          — computes all technical indicators → stock_features
+      5. Regime            — detects Nifty 50 Bull/Bear/Choppy regime (non-blocking)
+      6. Signals           — runs pattern detectors + composite ranker → stock_signals
+      7. Sector momentum   — sector RS scores (non-blocking)
+      8. Confidence calib  — T1/T2/T3 hit-rate model (non-blocking)
+      9. PA pipeline       — price action signals → stock_pa_signals (non-blocking)
+     10. MTF pipeline      — weekly/monthly EMA trends → stock_mtf_signals (non-blocking)
 
-    Failure policy: a failure in any step aborts the pipeline at that stage.
+    Failure policy: steps 1, 4, 6 are blocking (abort on failure).
+    All other steps are non-blocking — failures are logged as warnings and
+    the pipeline continues to SUCCESS.
+
     PipelineContext tracks completed/failed steps and is persisted to
     pipeline_runs via PipelineMonitor for full audit trail.
 
@@ -186,6 +197,36 @@ class MasterPipeline:
             )
             context.add_warning(f"Confidence calibration failed: {exc}")
             context.mark_step_completed("confidence_calibration")
+
+        # ── Step 8: Price Action pipeline (non-blocking) ──────────────────
+        # Reads stock_features (ema_50, relative_volume, OHLC) → computes
+        # daily + weekly HH/HL structure, volume quality, momentum, extension
+        # → writes stock_pa_signals.  Enables PA Trend and PA Score columns
+        # in the scanner without any manual script run.
+        logger.info("── Step [pa_pipeline] starting")
+        try:
+            PAPipeline.run()
+            context.mark_step_completed("pa_pipeline")
+            logger.info("── Step [pa_pipeline] completed")
+        except Exception as exc:
+            logger.warning("── Step [pa_pipeline] failed (non-blocking): %s", exc)
+            context.add_warning(f"PA pipeline failed: {exc}")
+            context.mark_step_completed("pa_pipeline")
+
+        # ── Step 9: MTF pipeline (non-blocking) ───────────────────────────
+        # Reads stock_features (close_price) → resamples to weekly (W-FRI)
+        # and monthly (ME) → computes EMA pairs → writes stock_mtf_signals.
+        # Enables W Trend / M Trend / MTF score columns in the scanner and
+        # the min_mtf_score backtest filter without any manual script run.
+        logger.info("── Step [mtf_pipeline] starting")
+        try:
+            MTFPipeline.run()
+            context.mark_step_completed("mtf_pipeline")
+            logger.info("── Step [mtf_pipeline] completed")
+        except Exception as exc:
+            logger.warning("── Step [mtf_pipeline] failed (non-blocking): %s", exc)
+            context.add_warning(f"MTF pipeline failed: {exc}")
+            context.mark_step_completed("mtf_pipeline")
 
         return MasterPipeline._finalize(context)
 
