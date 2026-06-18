@@ -467,6 +467,61 @@ class DashboardConfig:
             "trend_signal":     10,
             "stage2_signal":    10,
         },
+
+        # ── Time-horizon presets ────────────────────────────────────────────
+        # Intraday Picks: end-of-day scan for stocks breaking out with high
+        # liquidity and RS strength — best candidates to watch for next-session
+        # momentum. Liquidity is top priority so entries/exits are clean.
+        "Intraday Picks": {
+            "liquidity_signal":     35,
+            "breakout_signal":      30,
+            "rs_signal":            25,
+            "trend_signal":         10,
+        },
+
+        # Swing Trading: 3–20 day holds. VCP coiling near pivot with trend
+        # support = low-risk entry with defined stop. breakout_ready = stock
+        # is within entry range of the pivot (< BREAKOUT_READY_DIST_PCT).
+        "Swing Trading": {
+            "vcp_signal":           30,
+            "breakout_ready_signal": 25,
+            "trend_signal":         20,
+            "rs_signal":            15,
+            "liquidity_signal":     10,
+        },
+
+        # Short Term Momentum: 1–4 week post-breakout ride. Stock already
+        # cleared its pivot on volume; hold while price action remains strong.
+        # pa_signal confirms daily + weekly higher-high/higher-low structure.
+        "Short Term Momentum": {
+            "breakout_signal":      35,
+            "pa_signal":            20,
+            "rs_signal":            20,
+            "trend_signal":         15,
+            "stage2_signal":        10,
+        },
+
+        # Long Term Position: 3–12 month position building. Requires Weinstein
+        # Stage 2 base, all 8 Minervini conditions, 52w RS new high, AND quality
+        # fundamentals. Highest-conviction multi-month holds only.
+        "Long Term Position": {
+            "stage2_signal":        25,
+            "minervini_signal":     25,
+            "rs_new_high":          20,
+            "quality_signal":       20,
+            "trend_signal":         10,
+        },
+
+        # Trending Leaders: current market leaders in active uptrends.
+        # Use to identify which sectors/stocks are driving the market.
+        # Highest weight on 52w RS new high — only sustained leaders pass.
+        "Trending Leaders": {
+            "rs_new_high":          30,
+            "minervini_signal":     25,
+            "stage2_signal":        20,
+            "rs_signal":            15,
+            "trend_signal":         10,
+        },
     }
 
 
