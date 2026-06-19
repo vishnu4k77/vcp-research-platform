@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import yfinance as yf
@@ -14,6 +14,23 @@ from app.config.logging_config import get_logger
 from app.config.strategy_config import StrategyConfig
 
 logger = get_logger(__name__)
+
+
+def _nse_market_is_closed() -> bool:
+    """Return True if NSE has closed for today (after 15:30 IST = 10:00 UTC).
+
+    Uses UTC so no tz library needed. Config-driven via NSE_MARKET_CLOSE_UTC_HOUR/MINUTE.
+    This guards against storing partial intraday candles when the pipeline runs
+    during market hours — today's data is only safe to fetch after this returns True.
+    """
+    now_utc = datetime.now(timezone.utc)
+    close_utc = now_utc.replace(
+        hour=StrategyConfig.NSE_MARKET_CLOSE_UTC_HOUR,
+        minute=StrategyConfig.NSE_MARKET_CLOSE_UTC_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    return now_utc >= close_utc
 
 
 # ── Module-level retry wrapper ────────────────────────────────────────────────
@@ -82,21 +99,30 @@ class YahooFinanceService:
 
     @staticmethod
     def _determine_download_mode(latest_date) -> dict:
+        """Determine whether to skip, do a full historical download, or incremental.
 
+        Excludes today's date from the download window when NSE market is still open
+        (before 15:30 IST / 10:00 UTC) — prevents storing partial intraday candles.
+        Today's EOD candle is only safe to fetch after _nse_market_is_closed() = True.
+        """
         today = pd.Timestamp.today().date()
+        yesterday = today - timedelta(days=1)
+
+        # Safe upper bound: today only after market has closed, yesterday otherwise.
+        fetch_up_to = today if _nse_market_is_closed() else yesterday
 
         if latest_date is None:
-            return {"mode": "historical", "start_date": None}
+            return {"mode": "historical", "start_date": None, "end_date": fetch_up_to}
 
-        if latest_date >= today:
-            return {"mode": "skip", "start_date": None}
+        if latest_date >= fetch_up_to:
+            return {"mode": "skip", "start_date": None, "end_date": None}
 
         next_day = latest_date + timedelta(days=1)
 
-        if next_day > today:
-            return {"mode": "skip", "start_date": None}
+        if next_day > fetch_up_to:
+            return {"mode": "skip", "start_date": None, "end_date": None}
 
-        return {"mode": "incremental", "start_date": next_day}
+        return {"mode": "incremental", "start_date": next_day, "end_date": fetch_up_to}
 
     @staticmethod
     def _download_data(ticker: str, download_mode: dict) -> pd.DataFrame:
@@ -105,13 +131,18 @@ class YahooFinanceService:
             logger.debug("%s already up-to-date", ticker)
             return pd.DataFrame()
 
+        # yf.download end= is exclusive: to include fetch_up_to, pass fetch_up_to + 1 day.
+        end_date = download_mode.get("end_date")
+        end_str = (end_date + timedelta(days=1)).strftime("%Y-%m-%d") if end_date else None
+
         try:
             if download_mode["mode"] == "historical":
                 logger.debug(
-                    "Historical download for %s (%s)",
-                    ticker,
-                    StrategyConfig.YAHOO_HISTORICAL_PERIOD,
+                    "Historical download for %s (period=%s)",
+                    ticker, StrategyConfig.YAHOO_HISTORICAL_PERIOD,
                 )
+                # Historical uses period= (no start/end); partial intraday rows are
+                # stripped later in fetch_stock_data() using end_date from download_mode.
                 return _yf_download(
                     ticker,
                     period=StrategyConfig.YAHOO_HISTORICAL_PERIOD,
@@ -120,13 +151,18 @@ class YahooFinanceService:
                 )
 
             start_date = download_mode["start_date"]
-            logger.debug("Incremental download for %s from %s", ticker, start_date)
-            return _yf_download(
-                ticker,
-                start=start_date.strftime("%Y-%m-%d"),
-                progress=False,
-                auto_adjust=False,
+            logger.debug(
+                "Incremental download for %s from %s to %s",
+                ticker, start_date, end_str or "today",
             )
+            kwargs: dict = {
+                "start": start_date.strftime("%Y-%m-%d"),
+                "progress": False,
+                "auto_adjust": False,
+            }
+            if end_str:
+                kwargs["end"] = end_str
+            return _yf_download(ticker, **kwargs)
 
         except Exception as exc:
             logger.error("Yahoo download failed for %s: %s", ticker, exc, exc_info=True)
@@ -247,6 +283,22 @@ class YahooFinanceService:
             return pd.DataFrame()
 
         normalized = YahooFinanceService._normalize_datatypes(normalized)
+
+        # Strip rows beyond the safe fetch boundary — guards against partial intraday
+        # candles returned by Yahoo Finance when historical mode fetches via period=.
+        # Incremental mode already passes end= to yf.download, but we filter here too
+        # for defence-in-depth.
+        end_date = download_mode.get("end_date")
+        if end_date is not None and "trade_date" in normalized.columns:
+            before = len(normalized)
+            normalized = normalized[normalized["trade_date"] <= end_date]
+            dropped = before - len(normalized)
+            if dropped:
+                logger.info(
+                    "%s: dropped %d row(s) beyond safe fetch boundary %s "
+                    "(market still open — partial intraday candle excluded)",
+                    ticker, dropped, end_date,
+                )
 
         clean = YahooFinanceService._apply_quality_filters(normalized)
 

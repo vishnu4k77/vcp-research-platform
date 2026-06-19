@@ -119,6 +119,12 @@ class StrategyConfig:
     # Nifty 50 index ticker (Yahoo Finance format) — used by regime detection + RS signal
     NIFTY_TICKER = "^NSEI"
 
+    # NSE market close time in UTC (IST 15:30 = UTC 10:00).
+    # Used by YahooFinanceService to exclude today's partial intraday candle
+    # when the market is still open. Change these if NSE trading hours change.
+    NSE_MARKET_CLOSE_UTC_HOUR: int = 10
+    NSE_MARKET_CLOSE_UTC_MINUTE: int = 0
+
     # Relative Strength lookback — trading days for stock vs Nifty return comparison
     RS_LOOKBACK = 63   # ~3 months
 
