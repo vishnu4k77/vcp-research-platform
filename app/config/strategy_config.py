@@ -306,6 +306,11 @@ class EarningsConfig:
     # Keeps the table clean of Yahoo's speculative far-future estimates.
     MAX_FUTURE_DAYS: int = 365
 
+    # Abort refresh_all() early when this many consecutive network-level failures
+    # occur (DNS, connection refused, timeout). Prevents a 2-hour hang when Yahoo
+    # Finance is temporarily unreachable after a large OHLCV ingestion batch.
+    MAX_CONSECUTIVE_NETWORK_FAILURES: int = 5
+
 
 class DashboardConfig:
     """Streamlit dashboard UI parameters — all tuneable without code changes."""

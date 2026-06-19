@@ -32,6 +32,15 @@ from app.config.strategy_config import EarningsConfig, StrategyConfig
 logger = get_logger(__name__)
 
 
+class EarningsNetworkError(Exception):
+    """Raised when a Yahoo Finance earnings fetch fails due to a network-level error.
+
+    Distinguished from data-format errors (KeyError/TypeError/ValueError) which
+    are non-retryable.  refresh_all() tracks consecutive EarningsNetworkError
+    raises and aborts early when MAX_CONSECUTIVE_NETWORK_FAILURES is reached.
+    """
+
+
 # ── Retry wrapper for Yahoo Ticker calls ─────────────────────────────────────
 # Mirrors the pattern in yahoo_service.py: retry on any exception with
 # exponential backoff, parameters from config.
@@ -40,8 +49,9 @@ logger = get_logger(__name__)
     # Do NOT retry on structural/dependency errors — they won't resolve on the next attempt.
     #   ImportError / ModuleNotFoundError — missing package (install required)
     #   KeyError / TypeError / ValueError  — Yahoo returned unexpected data shape for this symbol
+    #   EarningsNetworkError               — re-raised after retries exhausted; caller handles it
     retry=retry_if_not_exception_type(
-        (ImportError, ModuleNotFoundError, KeyError, TypeError, ValueError)
+        (ImportError, ModuleNotFoundError, KeyError, TypeError, ValueError, EarningsNetworkError)
     ),
     stop=stop_after_attempt(EarningsConfig.RETRY_ATTEMPTS),
     wait=wait_exponential(
@@ -60,8 +70,21 @@ def _yf_earnings_dates(symbol: str) -> Optional[pd.DataFrame]:
 
     Returns:
         DataFrame with DatetimeIndex of earnings dates, or None if unavailable.
+
+    Raises:
+        EarningsNetworkError: On DNS failure, connection refused, or timeout — after
+            all retry attempts are exhausted. Caller (refresh_all) tracks consecutive
+            EarningsNetworkError and aborts early if Yahoo is broadly unreachable.
     """
-    return yf.Ticker(symbol).earnings_dates
+    try:
+        return yf.Ticker(symbol).earnings_dates
+    except (KeyError, TypeError, ValueError):
+        raise   # structural — re-raise so tenacity does NOT retry
+    except Exception as exc:
+        # Network-level failure (DNS, timeout, connection refused).
+        # Wrap in EarningsNetworkError so refresh_all() can distinguish it
+        # from a data-format error and abort early when Yahoo is unreachable.
+        raise EarningsNetworkError(str(exc)) from exc
 
 
 class EarningsService:
@@ -98,6 +121,10 @@ class EarningsService:
             # Yahoo returned an unexpected data shape — not a network error, not retryable.
             logger.debug("Yahoo earnings: unexpected structure for %s: %s", symbol, exc)
             return []
+        except EarningsNetworkError:
+            # Network failure after retries exhausted — re-raise so refresh_all()
+            # can track consecutive failures and abort early if Yahoo is unreachable.
+            raise
         except Exception as exc:
             logger.warning("Yahoo earnings fetch failed for %s: %s", symbol, exc)
             return []
@@ -254,6 +281,8 @@ class EarningsService:
         fetched = 0
         skipped = 0
         failed = 0
+        consecutive_network_failures = 0
+        max_consec = EarningsConfig.MAX_CONSECUTIVE_NETWORK_FAILURES
 
         logger.info("Earnings refresh starting | %d symbols", len(symbols))
 
@@ -262,12 +291,26 @@ class EarningsService:
                 made_call = EarningsService.refresh_symbol(symbol)
                 if made_call:
                     fetched += 1
+                    consecutive_network_failures = 0  # reset on any success
                     # Rate limit ONLY after a real Yahoo network call.
                     # Fresh (skipped) symbols never hit Yahoo so no delay needed.
                     if idx < len(symbols):
                         time.sleep(EarningsConfig.RATE_LIMIT_SECONDS)
                 else:
                     skipped += 1
+
+            except EarningsNetworkError as exc:
+                logger.warning("Earnings network error for %s: %s", symbol, exc)
+                failed += 1
+                consecutive_network_failures += 1
+                if consecutive_network_failures >= max_consec:
+                    logger.warning(
+                        "Earnings refresh aborted: %d consecutive network failures "
+                        "(Yahoo Finance unreachable) — fetched=%d skipped=%d failed=%d",
+                        consecutive_network_failures, fetched, skipped, failed,
+                    )
+                    return
+
             except Exception as exc:
                 logger.warning("Earnings refresh failed for %s: %s", symbol, exc)
                 failed += 1
