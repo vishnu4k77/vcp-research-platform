@@ -891,14 +891,15 @@ def _seed_sample_queries() -> None:
 
     current_names = [q["query_name"] for q in queries]
 
-    # Delete sample rows whose names are no longer in config (renamed/removed queries).
-    # Prevents unique-key collisions when a query is renamed — the old row would
-    # otherwise block the MERGE INSERT for the new name.
-    delete_stale = text("""
-        DELETE FROM saved_queries
-        WHERE is_sample = 1
-          AND query_name NOT IN :names
-    """)
+    # Build NOT IN clause with individual named params — pyodbc on SQL Server does
+    # not support passing a tuple to a single :param placeholder (TVP error).
+    # Parameterised names mean no SQL-injection risk from query_name values.
+    _not_in_placeholders = ", ".join(f":keep{i}" for i in range(len(current_names)))
+    _delete_stale_sql = (
+        f"DELETE FROM saved_queries WHERE is_sample = 1"
+        f" AND query_name NOT IN ({_not_in_placeholders})"
+    )
+    _delete_stale_params = {f"keep{i}": name for i, name in enumerate(current_names)}
 
     stmt = text("""
         MERGE saved_queries AS target
@@ -919,7 +920,7 @@ def _seed_sample_queries() -> None:
     try:
         with engine.begin() as conn:
             # Remove stale sample rows first so MERGE never hits a renamed-query collision
-            conn.execute(delete_stale, {"names": tuple(current_names)})
+            conn.execute(text(_delete_stale_sql), _delete_stale_params)
             for q in queries:
                 conn.execute(stmt, {
                     "name":     q["query_name"],
