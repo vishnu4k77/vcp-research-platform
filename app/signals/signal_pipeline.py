@@ -383,18 +383,54 @@ class SignalPipeline:
     # ── Regime gate ───────────────────────────────────────────────────────────
 
     @staticmethod
+    def _load_regime_breadth() -> dict:
+        """Load the latest distribution_count and follow_through_day from market_regime.
+
+        Called inside run() after RegimePipeline has already saved today's regime row.
+        Returns a dict with safe defaults so callers never need null-checks.
+
+        Returns:
+            Dict with keys: distribution_count (int), follow_through_day (bool or None).
+            distribution_count defaults to 0 on any error (gate stays open).
+        """
+        query = text("""
+            SELECT TOP 1
+                ISNULL(distribution_count, 0) AS distribution_count,
+                follow_through_day
+            FROM market_regime
+            ORDER BY trade_date DESC
+        """)
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(query).fetchone()
+            if row is None:
+                return {"distribution_count": 0, "follow_through_day": None}
+            return {
+                "distribution_count": int(row.distribution_count),
+                "follow_through_day": bool(row.follow_through_day) if row.follow_through_day is not None else None,
+            }
+        except Exception as exc:
+            logger.warning("_load_regime_breadth failed (gate stays open): %s", exc)
+            return {"distribution_count": 0, "follow_through_day": None}
+
+    @staticmethod
     def _apply_regime_gate(
         df: pd.DataFrame,
         allow_breakouts: bool,
         cash_mode: bool,
+        distribution_count: int = 0,
+        follow_through_day: "bool | None" = None,
     ) -> pd.DataFrame:
         """Suppress signals on the latest trade_date based on the current regime.
 
         Only the latest date's rows are affected — historical signals are
         preserved intact for backtesting accuracy.
 
-        When allow_breakouts=False:  breakout_signal, vcp_signal, breakout_ready_signal → 0
-        When cash_mode=True:         all directional signals → 0 (fully defensive)
+        Gate layers (applied in order, each can only zero signals):
+          1. cash_mode=True          → all directional signals → 0
+          2. allow_breakouts=False   → breakout/VCP signals → 0
+          3. distribution_count gate → breakout/VCP → 0 when dist_days ≥ threshold
+             (O'Neil: 5 distribution days in 25 sessions signals institutional selling)
 
         After zeroing signals, composite_score and institutional_candidate are
         recomputed for affected rows to stay consistent.
@@ -403,23 +439,25 @@ class SignalPipeline:
             df: All signal rows across all symbols and dates.
             allow_breakouts: From MarketQueryService.get_regime_environment().
             cash_mode: From MarketQueryService.get_regime_environment().
+            distribution_count: Nifty distribution days in last 25 sessions (from market_regime).
+            follow_through_day: Whether a follow-through day has been confirmed (informational only).
 
         Returns:
             df with gate applied to latest date rows.
         """
-        if df.empty or (allow_breakouts and not cash_mode):
+        dist_threshold = StrategyConfig.DISTRIBUTION_DAY_GATE_THRESHOLD
+        dist_gate_active = distribution_count >= dist_threshold
+
+        if df.empty or (allow_breakouts and not cash_mode and not dist_gate_active):
+            if follow_through_day is not None:
+                logger.info(
+                    "Regime gate: no suppression needed | dist_days=%d | ftd=%s",
+                    distribution_count, follow_through_day,
+                )
             return df
 
         latest_date = df["trade_date"].max()
         mask = df["trade_date"] == latest_date
-
-        if not allow_breakouts:
-            for col in ("breakout_signal", "vcp_signal", "breakout_ready_signal"):
-                if col in df.columns:
-                    df.loc[mask, col] = 0
-            logger.info(
-                "Regime gate applied: breakout/VCP suppressed for %s", latest_date
-            )
 
         if cash_mode:
             directional = [
@@ -430,8 +468,32 @@ class SignalPipeline:
                 if col in df.columns:
                     df.loc[mask, col] = 0
             logger.info(
-                "Regime gate applied: cash mode — all directional signals suppressed for %s",
+                "Regime gate: cash mode — all directional signals suppressed for %s",
                 latest_date,
+            )
+
+        if not allow_breakouts:
+            for col in ("breakout_signal", "vcp_signal", "breakout_ready_signal"):
+                if col in df.columns:
+                    df.loc[mask, col] = 0
+            logger.info(
+                "Regime gate: breakout/VCP suppressed (BEAR regime) for %s", latest_date
+            )
+
+        if dist_gate_active:
+            for col in ("breakout_signal", "vcp_signal", "breakout_ready_signal"):
+                if col in df.columns:
+                    df.loc[mask, col] = 0
+            logger.warning(
+                "Distribution day gate ACTIVE: %d days ≥ threshold=%d — "
+                "breakout/VCP suppressed for %s (O'Neil institutional selling signal)",
+                distribution_count, dist_threshold, latest_date,
+            )
+
+        if follow_through_day is not None:
+            logger.info(
+                "FTD status: follow_through_day=%s | dist_days=%d",
+                follow_through_day, distribution_count,
             )
 
         # Recompute composite_score for affected rows so it reflects zeroed signals
@@ -583,10 +645,13 @@ class SignalPipeline:
         # Apply regime gate to latest date only (historical rows untouched)
         if market_status is not None:
             env = MarketQueryService.get_regime_environment(market_status)
+            breadth = SignalPipeline._load_regime_breadth()
             final_df = SignalPipeline._apply_regime_gate(
                 final_df,
                 allow_breakouts=env["allow_breakouts"],
                 cash_mode=env["cash_mode"],
+                distribution_count=breadth["distribution_count"],
+                follow_through_day=breadth["follow_through_day"],
             )
 
         SignalPipeline.save_signals(final_df)

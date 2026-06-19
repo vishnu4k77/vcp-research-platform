@@ -122,6 +122,11 @@ class StrategyConfig:
     # Relative Strength lookback — trading days for stock vs Nifty return comparison
     RS_LOOKBACK = 63   # ~3 months
 
+    # O'Neil distribution day gate: suppress breakout/VCP signals when market has
+    # accumulated this many distribution days (Nifty down ≥0.2% on higher volume)
+    # in the last 25 sessions. Classic O'Neil threshold = 5.
+    DISTRIBUTION_DAY_GATE_THRESHOLD: int = 5
+
     # Yahoo Finance ingestion parameters
     YAHOO_HISTORICAL_PERIOD = "5y"   # lookback for first-time ingestion of a new ticker
     YAHOO_RATE_LIMIT_SLEEP_SECONDS = 3

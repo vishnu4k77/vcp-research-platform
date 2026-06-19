@@ -306,6 +306,17 @@ COLUMN_MIGRATIONS = [
     ("stock_signals", "ev_score",       "FLOAT NULL"),   # EV% = (P×T2%) − (1−P)×7% — primary rank
     # saved_queries — distinguishes seeded samples (1) from user-saved queries (0)
     ("saved_queries",  "is_sample",       "BIT NOT NULL CONSTRAINT df_sq_sample DEFAULT 0"),
+    # market_regime — Phase 2 breadth fields (computed by RegimeBreadthService, persisted by RegimePipeline)
+    ("market_regime", "breadth_positive",  "BIT  NULL"),   # >50% of Nifty stocks above EMA50
+    ("market_regime", "vix_risk_off",      "BIT  NULL"),   # India VIX > 20
+    ("market_regime", "distribution_count","INT  NULL"),   # Nifty down-days ≥0.2% on higher vol in last 25 sessions
+    ("market_regime", "follow_through_day","BIT  NULL"),   # O'Neil FTD: day4+ rally attempt ≥1.7% on higher vol
+    # stock_signals — Phase 2C: position management (trailing stop + stage tracking)
+    ("stock_signals", "position_stage",      "VARCHAR(12) NULL"),  # IN_BASE/ACTIVE/NEAR_T1/PAST_T1/PAST_T2
+    ("stock_signals", "trailing_stop_price", "FLOAT NULL"),         # dynamic stop in ₹, rises with price
+    # stock_signals — target_3 / T3 conservative early-gain target (25% measured move)
+    ("stock_signals", "target_3_price", "FLOAT NULL"),
+    ("stock_signals", "target_3_pct",   "FLOAT NULL"),
 ]
 
 # Saved scanner queries — user-named SQL strings stored from the dashboard UI.

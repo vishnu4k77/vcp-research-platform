@@ -81,10 +81,16 @@ class RegimePipeline:
                         "trade_date": result.trade_date,
                         "nifty_above_50ema": 1 if result.nifty_above_50ema else 0,
                         "nifty_above_200ema": 1 if result.nifty_above_200ema else 0,
-                        "breadth_positive": None,      # Phase 2
-                        "vix_risk_off": None,           # Phase 2
-                        "distribution_count": None,     # Phase 2
-                        "follow_through_day": None,     # Phase 2
+                        "breadth_positive": (
+                            1 if result.breadth_positive else 0
+                        ) if result.breadth_positive is not None else None,
+                        "vix_risk_off": (
+                            1 if result.vix_risk_off else 0
+                        ) if result.vix_risk_off is not None else None,
+                        "distribution_count": result.distribution_count,
+                        "follow_through_day": (
+                            1 if result.follow_through_day else 0
+                        ) if result.follow_through_day is not None else None,
                         "regime_score": result.regime_score,
                         "market_status": result.market_status,
                     },
