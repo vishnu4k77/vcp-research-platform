@@ -889,6 +889,17 @@ def _seed_sample_queries() -> None:
         logger.info("ScannerQueryConfig.SAMPLE_QUERIES is empty — skipping seed")
         return
 
+    current_names = [q["query_name"] for q in queries]
+
+    # Delete sample rows whose names are no longer in config (renamed/removed queries).
+    # Prevents unique-key collisions when a query is renamed — the old row would
+    # otherwise block the MERGE INSERT for the new name.
+    delete_stale = text("""
+        DELETE FROM saved_queries
+        WHERE is_sample = 1
+          AND query_name NOT IN :names
+    """)
+
     stmt = text("""
         MERGE saved_queries AS target
         USING (SELECT :name AS query_name) AS src
@@ -907,6 +918,8 @@ def _seed_sample_queries() -> None:
     upserted = 0
     try:
         with engine.begin() as conn:
+            # Remove stale sample rows first so MERGE never hits a renamed-query collision
+            conn.execute(delete_stale, {"names": tuple(current_names)})
             for q in queries:
                 conn.execute(stmt, {
                     "name":     q["query_name"],

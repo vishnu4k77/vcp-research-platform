@@ -823,7 +823,7 @@ class ScannerQueryConfig:
         },
         # ── 2. Dist Pivot% + IC + numeric sort ───────────────────────────────
         {
-            "query_name": "02 · IC candidates near pivot (≤ 2%)",
+            "query_name": "02 · IC candidates near pivot (within 2%)",
             "description": (
                 "Institutional-candidate stocks within 2 % of resistance pivot. "
                 "Demonstrates Dist Pivot% numeric filter + ASC sort."
